@@ -1,0 +1,36 @@
+{
+  "name": "@jscheunemann/sync-engine",
+  "version": "1.0.0",
+  "description": "Record sync shared by Clearwork and Fitness Tracker: versions per record, an outbox found by comparing with base copies, push before pull, a change feed, three-way field merges and idempotent ops.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./merge": { "types": "./dist/merge.d.ts", "default": "./dist/merge.js" },
+    "./ids": { "types": "./dist/ids.d.ts", "default": "./dist/ids.js" },
+    "./protocol": { "types": "./dist/protocol.d.ts", "default": "./dist/protocol.js" },
+    "./device": { "types": "./dist/device.d.ts", "default": "./dist/device.js" },
+    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test && npm run build && git diff --exit-code -- dist"
+  },
+  "peerDependencies": {
+    "postgres": "^3.4.7"
+  },
+  "peerDependenciesMeta": {
+    "postgres": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "postgres": "3.4.9",
+    "typescript": "5.9.3"
+  }
+}
