@@ -205,7 +205,7 @@ test('a refused record doesn’t hold up the others and isn’t sent again until
 
 test('the same op sent twice is applied once', async () => {
   const s = new MemServer();
-  const op: Op = { op_id: uuidv7(), type: 'notes', id: uuidv7(), base_version: null, fields: { title: 't' } };
+  const op: Op<T> = { op_id: uuidv7(), type: 'notes', id: uuidv7(), base_version: null, fields: { title: 't' } };
   const t = s.transport();
   const [first] = await t.push([op]);
   const [again] = await t.push([op]);

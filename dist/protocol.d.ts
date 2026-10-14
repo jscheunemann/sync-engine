@@ -19,11 +19,11 @@ export interface ServerRecord {
     deleted_at: string | null;
     [field: string]: unknown;
 }
-/** One change a device sends. */
-export interface Op {
+/** One change a device sends. T: the app's record types. */
+export interface Op<T extends string = string> {
     /** A fresh UUID per op; sending the same op again returns its first result (idempotency). */
     op_id: string;
-    type: string;
+    type: T;
     id: string;
     /** null: create. n: change or delete the record at version n; anything else is a conflict. */
     base_version: number | null;
@@ -75,7 +75,7 @@ export interface ChangesPage<T extends string = string> {
 }
 /** How a device reaches the server. An app can wrap one (to encrypt, or to reach iCloud) without the engine knowing. */
 export interface Transport<T extends string = string> {
-    push(ops: Op[]): Promise<OpResult[]>;
+    push(ops: Op<T>[]): Promise<OpResult[]>;
     /** Throws an error with status 410 when the cursor is too old (tombstones it needed were cleaned up). */
     changes(since: number): Promise<ChangesPage<T>>;
     /** `sealed`: the server's copy was encrypted on a device. Version 0: nothing saved yet. */
@@ -100,9 +100,7 @@ export declare const isUuid: (v: unknown) => v is string;
 export declare const isInstant: (v: unknown) => v is string;
 /** Checks an op's shape before it touches the database. `isType` says which record types this app has. */
 export declare function checkOp<T extends string>(raw: unknown, isType: (t: unknown) => t is T): {
-    op: Op & {
-        type: T;
-    };
+    op: Op<T>;
 } | {
     problems: Problem[];
     op_id?: string;

@@ -93,9 +93,7 @@ export declare function getRecord<T extends string>(db: Db, store: RecordStore<T
  *   * delete true tombstones; delete false brings a tombstone back.
  * Every applied result is stored by op_id; repeating the op returns it as a duplicate.
  */
-export declare function applyOp<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, op: Op & {
-    type: T;
-}, now: string): Promise<StoreOpResult<T>>;
+export declare function applyOp<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, op: Op<T>, now: string): Promise<StoreOpResult<T>>;
 /** The cursor is older than tombstones the server has cleaned up: the device must read everything again (HTTP 410). */
 export declare class CursorExpired extends Error {
     readonly status = 410;

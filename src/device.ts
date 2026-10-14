@@ -247,7 +247,7 @@ export async function sync<T extends string>(input: SyncInput<T>): Promise<SyncR
   }
 
   async function push(): Promise<boolean> {
-    const ops: Op[] = [];
+    const ops: Op<T>[] = [];
     const keyOf = new Map<string, string>();
     for (const k of new Set([...recs.keys(), ...Object.keys(state.base)])) {
       if (!isDirty(k)) continue;
@@ -257,7 +257,7 @@ export async function sync<T extends string>(input: SyncInput<T>): Promise<SyncR
       const b = state.base[k];
       const f = localFields(k);
       const at = state.seen[k]?.at ?? now();
-      let op: Op;
+      let op: Op<T>;
       if (!f) op = { op_id: newOpId(), type: b!.type, id: b!.id, base_version: b!.version, delete: true, client_updated_at: at };
       else if (!b) op = { op_id: newOpId(), type: r!.type, id: r!.id, base_version: null, fields: f, client_updated_at: at, created_at: r!.created_at ?? null };
       else {
@@ -284,7 +284,7 @@ export async function sync<T extends string>(input: SyncInput<T>): Promise<SyncR
         if (res.status === 'applied' || res.status === 'duplicate') {
           const before = localFields(k);
           const prior = recs.get(k);
-          state.base[k] = baseFrom(op.type as T, res.record, input.fieldsOf(op.type as T));
+          state.base[k] = baseFrom(op.type, res.record, input.fieldsOf(op.type));
           // The server's copy is what was sent, normalized (a done time filled in, a cleared field): take it.
           if (res.record.deleted_at) recs.delete(k);
           else recs.set(k, recFromBase(state.base[k]!));
@@ -293,7 +293,7 @@ export async function sync<T extends string>(input: SyncInput<T>): Promise<SyncR
           delete state.refused[k];
           out.pushed++;
         } else if (res.status === 'conflict') {
-          if (res.current) absorb(op.type as T, res.current);
+          if (res.current) absorb(op.type, res.current);
           again = true;
         } else if (res.status === 'not_found') {
           // The server no longer has it (cleaned up): make it again.

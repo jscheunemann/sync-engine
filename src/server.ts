@@ -104,7 +104,7 @@ const opAad = (opId: string) => `op|${opId}`;
  *   * delete true tombstones; delete false brings a tombstone back.
  * Every applied result is stored by op_id; repeating the op returns it as a duplicate.
  */
-export async function applyOp<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, op: Op & { type: T }, now: string): Promise<StoreOpResult<T>> {
+export async function applyOp<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, op: Op<T>, now: string): Promise<StoreOpResult<T>> {
   await crypto.prepare(tx);
   const done = await tx`select result from ${ident(tx, store.schema, 'applied_ops')} where op_id = ${op.op_id}`;
   if (done[0]) return { ...((await crypto.openDoc(tx, opAad(op.op_id), done[0].result)) as StoreOpResult<T> & { status: 'applied' }), status: 'duplicate' };
@@ -126,9 +126,9 @@ export async function applyOp<T extends string>(tx: Tx, store: RecordStore<T>, c
   }
 }
 
-const invalid = <T extends string>(op: Op & { type: T }, problems: Problem[]): StoreOpResult<T> => ({ op_id: op.op_id, status: 'invalid', type: op.type, id: op.id, problems });
+const invalid = <T extends string>(op: Op<T>, problems: Problem[]): StoreOpResult<T> => ({ op_id: op.op_id, status: 'invalid', type: op.type, id: op.id, problems });
 
-async function applyInSavepoint<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, op: Op & { type: T }, changes: Fields, now: string): Promise<StoreOpResult<T>> {
+async function applyInSavepoint<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, op: Op<T>, changes: Fields, now: string): Promise<StoreOpResult<T>> {
   return (await tx.savepoint(async (sp) => {
     const current = await getRecord(sp, store, crypto, op.type, op.id, true);
     let fields: Fields;
