@@ -66,6 +66,11 @@ An app supplies:
   keeps a coarser copy that still agrees) and `adopt`.
 - **`onPush`** (device, optional, 1.1.0): called once before a push with how many changes it sends in all, even when
   they go in several rounds of 500, for a progress count. It changes nothing about what's sent.
+- **`applyCreates`** (server, 1.2.0): many ops at once, for a restore. New records whose ids aren't known yet are
+  checked as `applyOp` checks a create and written with one insert per type (500 rows at a time), revs in one block,
+  each result kept for repeats; everything else goes through `applyOp`, so every op's outcome is what `applyOp` would
+  give. `RecordStore.bulkSafe(type)` says which types may go in bulk (a type whose `crossChecks` look at other new rows
+  answers false).
 
 ### Tables
 

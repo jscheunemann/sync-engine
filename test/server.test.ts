@@ -7,7 +7,7 @@ import postgres from 'postgres';
 import { emptyState, key, sync, type Recs, type SyncState } from '../src/device.ts';
 import { uuidv7 } from '../src/ids.ts';
 import { checkOp, type Fields, type Op, type Transport } from '../src/protocol.ts';
-import { applyOp, CursorExpired, getPrefs, plain, putPrefs, readChanges, type RecordStore, type Row, type StoredRecord, type Tx } from '../src/server.ts';
+import { applyCreates, applyOp, CursorExpired, getPrefs, plain, putPrefs, readChanges, type ContentCrypto, type RecordStore, type Row, type StoredRecord, type Tx } from '../src/server.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 const SCHEMA = 'se_test';
@@ -106,6 +106,55 @@ describe('server, against Postgres', { skip: !URL_ && 'TEST_DATABASE_URL not set
   after(async () => {
     await sql.unsafe(`drop schema if exists ${SCHEMA} cascade; drop owned by se_api; drop role if exists se_api`);
     await sql.end();
+  });
+
+  const bulk = (user: string, ops: Op[], crypto: ContentCrypto = plain) =>
+    as(user, (tx) => applyCreates(tx, STORE, crypto, ops.map((raw) => (checkOp(raw, STORE.isType) as { op: Op<T> }).op), new Date().toISOString()));
+  const create = (title: string, o: Partial<Op> = {}): Op => ({ op_id: uuidv7(), type: 'notes', id: uuidv7(), base_version: null, fields: { title, body: `about ${title}` }, ...o });
+
+  test('applyCreates writes new records in bulk, each just as applyOp would, in order, with revs in a row', async () => {
+    const ops = Array.from({ length: 1203 }, (_, i) => create(` Note ${i} `));
+    const results = await bulk(A, ops);
+    assert.equal(results.length, 1203);
+    assert.ok(results.every((r, i) => r.status === 'applied' && r.id === ops[i]!.id));
+    const recs = results.map((r) => (r as { record: StoredRecord }).record);
+    assert.deepEqual([recs[0]!.title, recs[0]!.body, recs[0]!.pinned, recs[0]!.version], ['Note 0', 'about  Note 0 ', false, 1], 'defaults, normalize, content');
+    const revs = recs.map((r) => r.rev);
+    assert.equal(new Set(revs).size, 1203, 'every rev its own');
+    assert.ok(revs.every((r, i) => i === 0 || r === revs[i - 1]! + 1), 'one block, in order');
+    // each kept like applyOp keeps it: sending it again is a duplicate with the same record
+    const [again] = await push(A, [ops[5]!]);
+    assert.equal(again!.status, 'duplicate');
+    assert.equal((again as { record: StoredRecord }).record.rev, revs[5]);
+    // and they reach the change feed, so other devices get them
+    const page = await as(A, (tx) => readChanges(tx, STORE, plain, revs[0]! - 1, 1000));
+    assert.equal(page.changes.length, 1000);
+  });
+
+  test('applyCreates sends anything else the one-by-one way: repeats, existing ids, changes, and what the rules refuse', async () => {
+    const [made] = await bulk(A, [create('first')]);
+    const existing = (made as { record: StoredRecord }).record;
+    const repeat = create('repeat');
+    await bulk(A, [repeat]);
+    const results = await bulk(A, [
+      create('fine'),
+      repeat, // the same op again: a duplicate
+      create('taken', { id: existing.id }), // an id that's there: a conflict, with the current copy
+      { op_id: uuidv7(), type: 'notes', id: existing.id, base_version: 1, fields: { pinned: true } }, // a change
+      create(''), // the app's rules: invalid
+      create('x'.repeat(41)), // a database rule: invalid, reported on the op
+      create('also fine'),
+    ]);
+    assert.deepEqual(results.map((r) => r.status), ['applied', 'duplicate', 'conflict', 'applied', 'invalid', 'invalid', 'applied']);
+    assert.equal((results[3] as { record: StoredRecord }).record.version, 2);
+    // one bad row didn't stop the good ones in its group
+    assert.equal((results[6] as { record: StoredRecord }).record.title, 'also fine');
+  });
+
+  test('applyCreates keeps each person’s records to themselves', async () => {
+    const [mine] = await bulk(uuidv7(), [create('only someone else')]);
+    const page = await as(A, (tx) => readChanges(tx, STORE, plain, 0, 100000));
+    assert.ok(!page.changes.some((c) => c.record.id === mine!.id));
   });
 
   test('create, change at the right version, refuse a stale one with the current copy', async () => {

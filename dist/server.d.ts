@@ -39,6 +39,12 @@ export interface RecordStore<T extends string = string> {
     toColumns(type: T, fields: Fields): Row & {
         content: Row;
     };
+    /**
+     * applyCreates (1.2.0): whether new records of this type may be written in bulk. A type with `crossChecks` whose
+     * rules look at other new rows (dependency cycles) answers false and goes one by one. Without it: types with no
+     * `crossChecks` are bulk, the rest one by one.
+     */
+    bulkSafe?(type: T): boolean;
 }
 /**
  * Encryption of what people wrote, when an app has it. Without it (`plain`), content is stored as it comes (enc 0).
@@ -94,6 +100,18 @@ export declare function getRecord<T extends string>(db: Db, store: RecordStore<T
  * Every applied result is stored by op_id; repeating the op returns it as a duplicate.
  */
 export declare function applyOp<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, op: Op<T>, now: string): Promise<StoreOpResult<T>>;
+/** How many rows one bulk insert writes (well inside Postgres's 65,535 parameters). */
+export declare const BULK_ROWS = 500;
+/**
+ * Applies many ops at once, for a restore (1.2.0): new records (base_version null, no delete) whose ids and op ids
+ * aren't known yet are checked one by one exactly as applyOp checks a create (shape, defaults, normalize, sealed or
+ * plain content, validate, created_at range) and then written with one insert per type and BULK_ROWS, their revs
+ * taken as one block, and every result kept in applied_ops as applyOp keeps it. Anything else (a change, a delete, a
+ * repeat, an id that exists, a type that isn't bulkSafe) goes through applyOp, so the outcome for every op is what
+ * applyOp would have given. A database rule refusing a bulk insert sends that group through applyOp instead, which
+ * reports each op on its own. Results come back in the order of `ops`. Run it inside the person's transaction.
+ */
+export declare function applyCreates<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, ops: Op<T>[], now: string): Promise<StoreOpResult<T>[]>;
 /** The cursor is older than tombstones the server has cleaned up: the device must read everything again (HTTP 410). */
 export declare class CursorExpired extends Error {
     readonly status = 410;
