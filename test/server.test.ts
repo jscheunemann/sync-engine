@@ -7,7 +7,7 @@ import postgres from 'postgres';
 import { emptyState, key, sync, type Recs, type SyncState } from '../src/device.ts';
 import { uuidv7 } from '../src/ids.ts';
 import { checkOp, type Fields, type Op, type Transport } from '../src/protocol.ts';
-import { applyCreates, applyOp, CursorExpired, getPrefs, plain, putPrefs, readChanges, type ContentCrypto, type RecordStore, type Row, type StoredRecord, type Tx } from '../src/server.ts';
+import { applyCreates, applyDeletes, applyOp, CursorExpired, getPrefs, plain, putPrefs, readChanges, type ContentCrypto, type RecordStore, type Row, type StoredRecord, type Tx } from '../src/server.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 const SCHEMA = 'se_test';
@@ -149,6 +149,47 @@ describe('server, against Postgres', { skip: !URL_ && 'TEST_DATABASE_URL not set
     assert.equal((results[3] as { record: StoredRecord }).record.version, 2);
     // one bad row didn't stop the good ones in its group
     assert.equal((results[6] as { record: StoredRecord }).record.title, 'also fine');
+  });
+
+  const bulkDelete = (user: string, ops: Op[]) =>
+    as(user, (tx) => applyDeletes(tx, STORE, plain, ops.map((raw) => (checkOp(raw, STORE.isType) as { op: Op<T> }).op), new Date().toISOString()));
+  const del = (r: StoredRecord, o: Partial<Op> = {}): Op => ({ op_id: uuidv7(), type: 'notes', id: r.id, base_version: r.version, delete: true, ...o });
+
+  test('applyDeletes tombstones many records at once, each as applyOp would, in order, revs in a row, kept for repeats', async () => {
+    const made = (await bulk(A, Array.from({ length: 1203 }, (_, i) => create(`Gone ${i}`)))).map((r) => (r as { record: StoredRecord }).record);
+    const ops = made.map((r) => del(r));
+    const results = await bulkDelete(A, ops);
+    assert.ok(results.every((r, i) => r.status === 'applied' && r.id === made[i]!.id));
+    const recs = results.map((r) => (r as { record: StoredRecord }).record);
+    assert.ok(recs.every((r, i) => r.deleted_at && r.version === made[i]!.version + 1 && r.body === made[i]!.body), 'a tombstone keeps everything');
+    const revs = recs.map((r) => r.rev);
+    assert.ok(revs.every((r, i) => i === 0 || r === revs[i - 1]! + 1), 'one block, in order');
+    const [again] = await push(A, [ops[7]!]);
+    assert.equal(again!.status, 'duplicate');
+    // brought back the usual way
+    const [back] = await push(A, [{ op_id: uuidv7(), type: 'notes', id: recs[0]!.id, base_version: recs[0]!.version, delete: false }]);
+    assert.equal((back as { record: StoredRecord }).record.deleted_at, null);
+    // other devices see the tombstones
+    const page = await as(A, (tx) => readChanges(tx, STORE, plain, revs[0]! - 1, 1000));
+    assert.ok(page.changes.every((c) => c.record.deleted_at || c.record.id === recs[0]!.id));
+  });
+
+  test('applyDeletes sends anything else the one-by-one way: changed since, gone, already deleted, repeats, not a plain delete', async () => {
+    const [a, b, c, d] = (await bulk(A, [create('a'), create('b'), create('c'), create('d')])).map((r) => (r as { record: StoredRecord }).record);
+    const [bChanged] = await push(A, [{ op_id: uuidv7(), type: 'notes', id: b!.id, base_version: 1, fields: { pinned: true } }]);
+    await bulkDelete(A, [del(c!)]);
+    const repeat = del(d!);
+    await bulkDelete(A, [repeat]);
+    const results = await bulkDelete(A, [
+      del(a!), // fine
+      del(b!), // changed on another device since: a conflict, with the current copy
+      del(c!), // already deleted (its version moved on): a conflict
+      repeat, // the same op again: a duplicate
+      del({ ...a!, id: uuidv7() }), // not there: not_found
+      { op_id: uuidv7(), type: 'notes', id: (bChanged as { record: StoredRecord }).record.id, base_version: 2, delete: true, fields: { title: 'and changed' } }, // not a plain delete: one by one, applied
+    ]);
+    assert.deepEqual(results.map((r) => r.status), ['applied', 'conflict', 'conflict', 'duplicate', 'not_found', 'applied']);
+    assert.equal((results[1] as { current: StoredRecord }).current.pinned, true);
   });
 
   test('applyCreates keeps each person’s records to themselves', async () => {

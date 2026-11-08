@@ -71,6 +71,9 @@ An app supplies:
   each result kept for repeats; everything else goes through `applyOp`, so every op's outcome is what `applyOp` would
   give. `RecordStore.bulkSafe(type)` says which types may go in bulk (a type whose `crossChecks` look at other new rows
   answers false).
+- **`applyDeletes`** (server, 1.3.0): many deletes at once, for clearing all data. A plain delete of a record that's
+  there, live and at the version the device saw is checked as `applyOp` checks it and tombstoned with one update per
+  type (500 rows at a time), revs in one block, each result kept; everything else goes through `applyOp`.
 
 ### Tables
 
