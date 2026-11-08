@@ -192,6 +192,18 @@ describe('server, against Postgres', { skip: !URL_ && 'TEST_DATABASE_URL not set
     assert.equal((results[1] as { current: StoredRecord }).current.pinned, true);
   });
 
+  test('a restore sent again (new op ids, the same records): every one a conflict with its current copy, in one call', async () => {
+    const ops = Array.from({ length: 700 }, (_, i) => create(`Again ${i}`));
+    await bulk(A, ops);
+    const resent = ops.map((o) => ({ ...o, op_id: uuidv7() }));
+    const again = await bulk(A, resent.slice(1));
+    assert.ok(again.every((r, i) => r.status === 'conflict' && (r as { current: StoredRecord }).current.id === ops[i + 1]!.id && (r as { current: StoredRecord }).current.title === `Again ${i + 1}`));
+    // the same answer applyOp gives
+    const [viaBulk] = await bulk(A, [resent[0]!]);
+    const [viaOne] = await push(A, [{ ...resent[0]!, op_id: uuidv7() }]);
+    assert.deepEqual({ ...viaBulk, op_id: '' }, { ...viaOne, op_id: '' });
+  });
+
   test('applyCreates keeps each person’s records to themselves', async () => {
     const [mine] = await bulk(uuidv7(), [create('only someone else')]);
     const page = await as(A, (tx) => readChanges(tx, STORE, plain, 0, 100000));

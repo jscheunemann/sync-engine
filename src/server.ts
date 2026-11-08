@@ -247,12 +247,15 @@ export async function applyCreates<T extends string>(tx: Tx, store: RecordStore<
     const done = new Set((await tx`select op_id from ${ident(tx, store.schema, 'applied_ops')} where op_id in ${tx(opIds)}`).map((r) => String(r.op_id)));
     const byType = new Map<T, string[]>();
     for (const c of candidates) byType.set(c.op.type, [...(byType.get(c.op.type) ?? []), c.op.id]);
-    const exists = new Set<string>();
-    for (const [t, ids] of byType) for (const r of await tx`select id from ${ident(tx, store.schema, t)} where id in ${tx(ids)}`) exists.add(`${t}:${String(r.id)}`);
+    // An id that's already there is a conflict with its current copy, as applyOp answers a create of it (1.3.1): read
+    // in one query per type, not one op at a time, so a restore sent again after a reload stays fast.
+    const exists = new Map<string, Row>();
+    for (const [t, ids] of byType) for (const r of await tx`select * from ${ident(tx, store.schema, t)} where id in ${tx(ids)}`) exists.set(`${t}:${String(r.id)}`, r as Row);
     const seen = new Set<string>();
     for (const c of candidates) {
       const k = `${c.op.type}:${c.op.id}`;
-      if (done.has(c.op.op_id) || exists.has(k) || seen.has(k)) slow.add(c.i);
+      if (done.has(c.op.op_id) || seen.has(k)) slow.add(c.i);
+      else if (exists.has(k)) results[c.i] = { op_id: c.op.op_id, status: 'conflict', type: c.op.type, id: c.op.id, current: store.toRecord(c.op.type, await crypto.openRow(tx, c.op.type, exists.get(k)!)) };
       seen.add(k);
     }
   }
@@ -262,7 +265,7 @@ export async function applyCreates<T extends string>(tx: Tx, store: RecordStore<
   type Ready = { i: number; op: Op<T>; row: Row; content: Row };
   const ready: Ready[] = [];
   for (const { op, i } of candidates) {
-    if (slow.has(i)) continue;
+    if (slow.has(i) || results[i]) continue;
     const changes = op.fields ?? {};
     const shape = store.checkChanges(op.type, changes);
     if (shape.length) { results[i] = invalid(op, shape); continue; }
@@ -374,7 +377,11 @@ export async function applyDeletes<T extends string>(tx: Tx, store: RecordStore<
             const go: { op: Op<T>; i: number }[] = [];
             for (const p of part) {
               const row = current.get(p.op.id);
-              if (!row || row.deleted_at || Number(row.version) !== p.op.base_version) { slow.add(p.i); continue; }
+              // As applyOp answers (1.3.1), without a query each: gone is not_found; another version is a conflict with the
+              // current copy. Already deleted at the version seen goes one by one (applyOp keeps its deletion time).
+              if (!row) { results[p.i] = { op_id: p.op.op_id, status: 'not_found', type, id: p.op.id }; continue; }
+              if (Number(row.version) !== p.op.base_version) { results[p.i] = { op_id: p.op.op_id, status: 'conflict', type, id: p.op.id, current: store.toRecord(type, await crypto.openRow(sp, type, row)) }; continue; }
+              if (row.deleted_at) { slow.add(p.i); continue; }
               const rec = store.toRecord(type, await crypto.openRow(sp, type, row));
               const fields = store.normalize(type, fieldsFrom(store, type, rec), now);
               const problems = store.validate(type, fields, p.op.id, { sealed: Number(row.enc) === 2 });
