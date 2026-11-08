@@ -64,6 +64,8 @@ An app supplies:
   the device's whole copy, for a transport that encrypts; a transport must never send it as is.
 - **Hooks** (device): `fieldsOf`, and optionally `stabilize` (keep the server's precise value when the device only
   keeps a coarser copy that still agrees) and `adopt`.
+- **`onPush`** (device, optional, 1.1.0): called once before a push with how many changes it sends in all, even when
+  they go in several rounds of 500, for a progress count. It changes nothing about what's sent.
 
 ### Tables
 
