@@ -244,11 +244,11 @@ export async function applyCreates<T extends string>(tx: Tx, store: RecordStore<
   // Repeats and ids already there take applyOp's path (a duplicate, or a conflict).
   if (candidates.length) {
     const opIds = candidates.map((c) => c.op.op_id);
-    const done = new Set((await tx`select op_id from ${ident(tx, store.schema, 'applied_ops')} where op_id = any(${opIds}::uuid[])`).map((r) => String(r.op_id)));
+    const done = new Set((await tx`select op_id from ${ident(tx, store.schema, 'applied_ops')} where op_id in ${tx(opIds)}`).map((r) => String(r.op_id)));
     const byType = new Map<T, string[]>();
     for (const c of candidates) byType.set(c.op.type, [...(byType.get(c.op.type) ?? []), c.op.id]);
     const exists = new Set<string>();
-    for (const [t, ids] of byType) for (const r of await tx`select id from ${ident(tx, store.schema, t)} where id = any(${ids}::uuid[])`) exists.add(`${t}:${String(r.id)}`);
+    for (const [t, ids] of byType) for (const r of await tx`select id from ${ident(tx, store.schema, t)} where id in ${tx(ids)}`) exists.add(`${t}:${String(r.id)}`);
     const seen = new Set<string>();
     for (const c of candidates) {
       const k = `${c.op.type}:${c.op.id}`;
