@@ -1,6 +1,6 @@
 {
   "name": "@jscheunemann/sync-engine",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Record sync shared by Clearwork and Fitness Tracker: versions per record, an outbox found by comparing with base copies, push before pull, a change feed, three-way field merges and idempotent ops.",
   "license": "UNLICENSED",
   "type": "module",

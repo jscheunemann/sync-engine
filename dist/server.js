@@ -157,6 +157,141 @@ async function applyInSavepoint(tx, store, crypto, op, changes, now) {
         return result;
     }));
 }
+/** How many rows one bulk insert writes (well inside Postgres's 65,535 parameters). */
+export const BULK_ROWS = 500;
+/**
+ * Applies many ops at once, for a restore (1.2.0): new records (base_version null, no delete) whose ids and op ids
+ * aren't known yet are checked one by one exactly as applyOp checks a create (shape, defaults, normalize, sealed or
+ * plain content, validate, created_at range) and then written with one insert per type and BULK_ROWS, their revs
+ * taken as one block, and every result kept in applied_ops as applyOp keeps it. Anything else (a change, a delete, a
+ * repeat, an id that exists, a type that isn't bulkSafe) goes through applyOp, so the outcome for every op is what
+ * applyOp would have given. A database rule refusing a bulk insert sends that group through applyOp instead, which
+ * reports each op on its own. Results come back in the order of `ops`. Run it inside the person's transaction.
+ */
+export async function applyCreates(tx, store, crypto, ops, now) {
+    await crypto.prepare(tx);
+    const results = new Array(ops.length);
+    const isCreate = (op) => op.base_version === null && op.delete === undefined;
+    const bulkType = (t) => (store.bulkSafe ? store.bulkSafe(t) : !store.crossChecks);
+    const candidates = ops.map((op, i) => ({ op, i })).filter(({ op }) => isCreate(op) && bulkType(op.type));
+    const slow = new Set(ops.map((_, i) => i).filter((i) => !candidates.some((c) => c.i === i)));
+    // Repeats and ids already there take applyOp's path (a duplicate, or a conflict).
+    if (candidates.length) {
+        const opIds = candidates.map((c) => c.op.op_id);
+        const done = new Set((await tx `select op_id from ${ident(tx, store.schema, 'applied_ops')} where op_id = any(${opIds}::uuid[])`).map((r) => String(r.op_id)));
+        const byType = new Map();
+        for (const c of candidates)
+            byType.set(c.op.type, [...(byType.get(c.op.type) ?? []), c.op.id]);
+        const exists = new Set();
+        for (const [t, ids] of byType)
+            for (const r of await tx `select id from ${ident(tx, store.schema, t)} where id = any(${ids}::uuid[])`)
+                exists.add(`${t}:${String(r.id)}`);
+        const seen = new Set();
+        for (const c of candidates) {
+            const k = `${c.op.type}:${c.op.id}`;
+            if (done.has(c.op.op_id) || exists.has(k) || seen.has(k))
+                slow.add(c.i);
+            seen.add(k);
+        }
+    }
+    const vault = candidates.some((c) => store.contentFields(c.op.type).length) ? await crypto.vaultEnabled(tx) : false;
+    const ready = [];
+    for (const { op, i } of candidates) {
+        if (slow.has(i))
+            continue;
+        const changes = op.fields ?? {};
+        const shape = store.checkChanges(op.type, changes);
+        if (shape.length) {
+            results[i] = invalid(op, shape);
+            continue;
+        }
+        const fields = store.normalize(op.type, { ...store.defaults(op.type), ...changes }, now);
+        const named = store.contentFields(op.type);
+        const changedContent = Object.keys(changes).filter((k) => named.includes(k));
+        let device = false;
+        if (op.sealed !== undefined) {
+            if (changedContent.length) {
+                results[i] = invalid(op, [{ field: changedContent[0], code: 'content_outside_sealed' }]);
+                continue;
+            }
+            device = true;
+        }
+        else if (named.length && vault) {
+            results[i] = invalid(op, [{ field: 'sealed', code: 'sealed_required' }]);
+            continue;
+        }
+        const problems = store.validate(op.type, fields, op.id, { sealed: device });
+        if (problems.length) {
+            results[i] = invalid(op, problems);
+            continue;
+        }
+        let createdAt;
+        if (op.created_at) {
+            const t = Date.parse(op.created_at);
+            if (t < Date.parse('2000-01-01T00:00:00Z') || t > Date.parse(now) + 86_400_000) {
+                results[i] = invalid(op, [{ field: 'created_at', code: 'out_of_range' }]);
+                continue;
+            }
+            createdAt = op.created_at;
+        }
+        const cols = store.toColumns(op.type, fields);
+        let content;
+        if (device) {
+            content = { c: op.sealed };
+            cols.enc = 2;
+            cols.key_version = op.key_version;
+        }
+        else {
+            const sealed = await crypto.sealContent(tx, op.type, op.id, cols.content);
+            content = sealed.content;
+            cols.enc = sealed.enc;
+            cols.key_version = sealed.key_version;
+        }
+        delete cols.content;
+        ready.push({ i, op, row: { id: op.id, ...cols, deleted_at: null, client_updated_at: op.client_updated_at ?? null, created_at: createdAt ?? now, updated_at: now }, content });
+    }
+    // Written a type and BULK_ROWS at a time, in a savepoint each: refused, that group goes one by one.
+    const groups = new Map();
+    for (const r of ready)
+        groups.set(r.op.type, [...(groups.get(r.op.type) ?? []), r]);
+    for (const [type, list] of groups) {
+        for (let g = 0; g < list.length; g += BULK_ROWS) {
+            const part = list.slice(g, g + BULK_ROWS);
+            try {
+                await tx.savepoint(async (sp) => {
+                    // One block of revs for the group, in order: the first from next_rev() (which makes the counter if need be).
+                    const [{ rev: first }] = (await sp `select ${sp(store.schema)}.next_rev() as rev`);
+                    if (part.length > 1)
+                        await sp `update ${ident(sp, store.schema, 'counters')} set rev = rev + ${part.length - 1} where user_id = ${sp(store.schema)}.current_user_id()`;
+                    const rows = part.map((r, k) => ({ ...r.row, rev: String(BigInt(first) + BigInt(k)), content: sp.json(r.content) }));
+                    const written = await sp `insert into ${ident(sp, store.schema, type)} ${sp(rows)} returning *`;
+                    const byId = new Map(written.map((w) => [String(w.id), w]));
+                    const kept = [];
+                    for (const r of part) {
+                        const record = store.toRecord(type, await crypto.openRow(sp, type, byId.get(r.op.id)));
+                        const result = { op_id: r.op.op_id, status: 'applied', type, id: r.op.id, created: true, record };
+                        results[r.i] = result;
+                        kept.push({ op_id: r.op.op_id, result: sp.json((await crypto.sealDoc(sp, opAad(r.op.op_id), result))) });
+                    }
+                    await sp `insert into ${ident(sp, store.schema, 'applied_ops')} ${sp(kept, 'op_id', 'result')}`;
+                });
+            }
+            catch (e) {
+                const code = e?.code ?? '';
+                if (!code.startsWith('23'))
+                    throw e;
+                for (const r of part) {
+                    results[r.i] = undefined;
+                    slow.add(r.i);
+                }
+            }
+        }
+    }
+    // Everything else, one by one, in order.
+    for (const i of [...slow].sort((a, b) => a - b))
+        results[i] = await applyOp(tx, store, crypto, ops[i], now);
+    return results;
+}
 /** The cursor is older than tombstones the server has cleaned up: the device must read everything again (HTTP 410). */
 export class CursorExpired extends Error {
     status = 410;
