@@ -205,6 +205,7 @@ export async function sync(input) {
         }
         if (!ops.length)
             return false;
+        input.onPush?.(ops.length);
         let again = false;
         for (let i = 0; i < ops.length; i += 500) {
             const batch = ops.slice(i, i + 500);

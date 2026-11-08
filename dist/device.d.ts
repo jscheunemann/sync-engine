@@ -74,6 +74,8 @@ export interface SyncInput<T extends string = string> {
     resealBelow?: (type: T | 'prefs') => number | null;
     now?: () => string;
     newOpId?: () => string;
+    /** Before a push: how many changes it will send in all (also when they go in several rounds), for a progress count. */
+    onPush?: (total: number) => void;
 }
 export interface SyncResult<T extends string = string> {
     recs: Recs<T>;

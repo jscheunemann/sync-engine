@@ -276,3 +276,17 @@ test('stabilize: a coarser copy that still agrees with the server is not a chang
   assert.equal(s.pushes, pushes, 'nothing sent');
   assert.equal(s.rows.get(key('notes', id))!.title, '2026-10-14T09:30:00Z');
 });
+
+test('onPush says how many changes a push sends in all, across rounds of 500, before the first goes', async () => {
+  const server = new MemServer();
+  const seen: number[] = [];
+  let pushesAtCount = -1;
+  const a = new Device(server, 'a', { onPush: (n) => { seen.push(n); pushesAtCount = server.pushes; } });
+  for (let i = 0; i < 1203; i++) a.set('notes', uuidv7(), { title: `Note ${i}` });
+  await a.sync();
+  assert.deepEqual(seen, [1203]);
+  assert.equal(pushesAtCount, 0, 'told before anything is sent');
+  assert.equal(server.pushes, 3, 'still three rounds of at most 500');
+  await a.sync();
+  assert.deepEqual(seen, [1203], 'nothing to send: not called');
+});
