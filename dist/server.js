@@ -182,22 +182,26 @@ export async function applyCreates(tx, store, crypto, ops, now) {
         const byType = new Map();
         for (const c of candidates)
             byType.set(c.op.type, [...(byType.get(c.op.type) ?? []), c.op.id]);
-        const exists = new Set();
+        // An id that's already there is a conflict with its current copy, as applyOp answers a create of it (1.3.1): read
+        // in one query per type, not one op at a time, so a restore sent again after a reload stays fast.
+        const exists = new Map();
         for (const [t, ids] of byType)
-            for (const r of await tx `select id from ${ident(tx, store.schema, t)} where id in ${tx(ids)}`)
-                exists.add(`${t}:${String(r.id)}`);
+            for (const r of await tx `select * from ${ident(tx, store.schema, t)} where id in ${tx(ids)}`)
+                exists.set(`${t}:${String(r.id)}`, r);
         const seen = new Set();
         for (const c of candidates) {
             const k = `${c.op.type}:${c.op.id}`;
-            if (done.has(c.op.op_id) || exists.has(k) || seen.has(k))
+            if (done.has(c.op.op_id) || seen.has(k))
                 slow.add(c.i);
+            else if (exists.has(k))
+                results[c.i] = { op_id: c.op.op_id, status: 'conflict', type: c.op.type, id: c.op.id, current: store.toRecord(c.op.type, await crypto.openRow(tx, c.op.type, exists.get(k))) };
             seen.add(k);
         }
     }
     const vault = candidates.some((c) => store.contentFields(c.op.type).length) ? await crypto.vaultEnabled(tx) : false;
     const ready = [];
     for (const { op, i } of candidates) {
-        if (slow.has(i))
+        if (slow.has(i) || results[i])
             continue;
         const changes = op.fields ?? {};
         const shape = store.checkChanges(op.type, changes);
@@ -331,7 +335,17 @@ export async function applyDeletes(tx, store, crypto, ops, now) {
                         const go = [];
                         for (const p of part) {
                             const row = current.get(p.op.id);
-                            if (!row || row.deleted_at || Number(row.version) !== p.op.base_version) {
+                            // As applyOp answers (1.3.1), without a query each: gone is not_found; another version is a conflict with the
+                            // current copy. Already deleted at the version seen goes one by one (applyOp keeps its deletion time).
+                            if (!row) {
+                                results[p.i] = { op_id: p.op.op_id, status: 'not_found', type, id: p.op.id };
+                                continue;
+                            }
+                            if (Number(row.version) !== p.op.base_version) {
+                                results[p.i] = { op_id: p.op.op_id, status: 'conflict', type, id: p.op.id, current: store.toRecord(type, await crypto.openRow(sp, type, row)) };
+                                continue;
+                            }
+                            if (row.deleted_at) {
                                 slow.add(p.i);
                                 continue;
                             }
