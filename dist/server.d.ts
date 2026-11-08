@@ -112,6 +112,16 @@ export declare const BULK_ROWS = 500;
  * reports each op on its own. Results come back in the order of `ops`. Run it inside the person's transaction.
  */
 export declare function applyCreates<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, ops: Op<T>[], now: string): Promise<StoreOpResult<T>[]>;
+/**
+ * Deletes many records at once, for clearing all data (1.3.0): ops that delete (delete: true, no field changes) a record
+ * that's there, not yet deleted, at the version the device saw, are checked as applyOp checks a delete (the record's
+ * fields still valid) and then tombstoned with one update per type and BULK_ROWS, their revs taken as one block, every
+ * result kept in applied_ops. A tombstone keeps everything, so a record can still be brought back. Anything else (a
+ * record changed since, gone, already deleted, a repeat, an op that isn't a plain delete) goes through applyOp, so every
+ * op's outcome is what applyOp would give. Results come back in the order of `ops`. Run it inside the person's
+ * transaction.
+ */
+export declare function applyDeletes<T extends string>(tx: Tx, store: RecordStore<T>, crypto: ContentCrypto, ops: Op<T>[], now: string): Promise<StoreOpResult<T>[]>;
 /** The cursor is older than tombstones the server has cleaned up: the device must read everything again (HTTP 410). */
 export declare class CursorExpired extends Error {
     readonly status = 410;

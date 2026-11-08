@@ -292,6 +292,98 @@ export async function applyCreates(tx, store, crypto, ops, now) {
         results[i] = await applyOp(tx, store, crypto, ops[i], now);
     return results;
 }
+/**
+ * Deletes many records at once, for clearing all data (1.3.0): ops that delete (delete: true, no field changes) a record
+ * that's there, not yet deleted, at the version the device saw, are checked as applyOp checks a delete (the record's
+ * fields still valid) and then tombstoned with one update per type and BULK_ROWS, their revs taken as one block, every
+ * result kept in applied_ops. A tombstone keeps everything, so a record can still be brought back. Anything else (a
+ * record changed since, gone, already deleted, a repeat, an op that isn't a plain delete) goes through applyOp, so every
+ * op's outcome is what applyOp would give. Results come back in the order of `ops`. Run it inside the person's
+ * transaction.
+ */
+export async function applyDeletes(tx, store, crypto, ops, now) {
+    await crypto.prepare(tx);
+    const results = new Array(ops.length);
+    const slow = new Set();
+    const plainDelete = (op) => op.delete === true && op.base_version !== null && !Object.keys(op.fields ?? {}).length && op.sealed === undefined;
+    const cands = ops.map((op, i) => ({ op, i })).filter(({ op, i }) => (plainDelete(op) ? true : (slow.add(i), false)));
+    if (cands.length) {
+        const done = new Set((await tx `select op_id from ${ident(tx, store.schema, 'applied_ops')} where op_id in ${tx(cands.map((c) => c.op.op_id))}`).map((r) => String(r.op_id)));
+        const byType = new Map();
+        const seen = new Set();
+        for (const c of cands) {
+            const k = `${c.op.type}:${c.op.id}`;
+            if (done.has(c.op.op_id) || seen.has(k))
+                slow.add(c.i);
+            else
+                byType.set(c.op.type, [...(byType.get(c.op.type) ?? []), c]);
+            seen.add(k);
+        }
+        for (const [type, list] of byType) {
+            for (let g = 0; g < list.length; g += BULK_ROWS) {
+                const part = list.slice(g, g + BULK_ROWS);
+                try {
+                    await tx.savepoint(async (sp) => {
+                        const table = ident(sp, store.schema, type);
+                        const rows = await sp `select * from ${table} where id in ${sp(part.map((p) => p.op.id))} for update`;
+                        const current = new Map(rows.map((r) => [String(r.id), r]));
+                        // What goes in bulk: there, live, at the version seen, and still valid as applyOp would check it.
+                        const go = [];
+                        for (const p of part) {
+                            const row = current.get(p.op.id);
+                            if (!row || row.deleted_at || Number(row.version) !== p.op.base_version) {
+                                slow.add(p.i);
+                                continue;
+                            }
+                            const rec = store.toRecord(type, await crypto.openRow(sp, type, row));
+                            const fields = store.normalize(type, fieldsFrom(store, type, rec), now);
+                            const problems = store.validate(type, fields, p.op.id, { sealed: Number(row.enc) === 2 });
+                            if (problems.length) {
+                                results[p.i] = invalid(p.op, problems);
+                                continue;
+                            }
+                            go.push(p);
+                        }
+                        if (!go.length)
+                            return;
+                        const [{ rev: first }] = (await sp `select ${sp(store.schema)}.next_rev() as rev`);
+                        if (go.length > 1)
+                            await sp `update ${ident(sp, store.schema, 'counters')} set rev = rev + ${go.length - 1} where user_id = ${sp(store.schema)}.current_user_id()`;
+                        // One update for the group: each row its own rev, from a list of (id, rev, client time).
+                        const vals = go.map((p, k) => [p.op.id, String(BigInt(first) + BigInt(k)), p.op.client_updated_at ?? null]);
+                        const written = await sp `
+              update ${table} t set deleted_at = ${now}, version = t.version + 1, updated_at = ${now}, rev = v.rev::bigint,
+                client_updated_at = coalesce(v.cua::timestamptz, t.client_updated_at)
+              from (values ${sp(vals)}) as v(id, rev, cua)
+              where t.id = v.id::uuid returning t.*`;
+                        const byId = new Map(written.map((w) => [String(w.id), w]));
+                        const kept = [];
+                        for (const p of go) {
+                            const record = store.toRecord(type, await crypto.openRow(sp, type, byId.get(p.op.id)));
+                            const result = { op_id: p.op.op_id, status: 'applied', type, id: p.op.id, created: false, record };
+                            results[p.i] = result;
+                            kept.push({ op_id: p.op.op_id, result: sp.json((await crypto.sealDoc(sp, opAad(p.op.op_id), result))) });
+                        }
+                        await sp `insert into ${ident(sp, store.schema, 'applied_ops')} ${sp(kept, 'op_id', 'result')}`;
+                    });
+                }
+                catch (e) {
+                    const code = e?.code ?? '';
+                    if (!code.startsWith('23'))
+                        throw e;
+                    for (const p of part) {
+                        results[p.i] = undefined;
+                        slow.add(p.i);
+                    }
+                }
+            }
+        }
+    }
+    for (const i of [...slow].sort((a, b) => a - b))
+        if (!results[i])
+            results[i] = await applyOp(tx, store, crypto, ops[i], now);
+    return results;
+}
 /** The cursor is older than tombstones the server has cleaned up: the device must read everything again (HTTP 410). */
 export class CursorExpired extends Error {
     status = 410;
