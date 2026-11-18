@@ -46,9 +46,12 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 **A new device pulls first**, and an app can adopt server records that are the same as ones the device made
 (`adopt`, e.g. `adoptByName('contexts', 'name')`) so defaults don't appear twice.
 
-## Version 2 (in progress): the engine owns data access
+## Version 2: the engine owns data access
 
-Following `docs/adr/` 0002 to 0011, an app gives the engine connection settings and intents; the engine owns the
+Version 2.0.0 (ADR 0011). Install with `github:jscheunemann/sync-engine#v2.0.0`. Version 1's `./server` is still in the
+package, unchanged, for apps that haven't moved yet.
+
+Following `docs/adr/` 0002 to 0016, an app gives the engine connection settings and intents; the engine owns the
 driver, the SQL, transactions and per-person isolation. Nothing database-shaped crosses: no SQL, connection or driver
 types. Part 1: the core and the Postgres backend, on today's tables. Part 2: declared types, find and count, and
 system intents with their audit (ADR 0012). Part 3: one backend for Postgres.js 3 and 4 (ADR 0013). Part 4:
