@@ -8,14 +8,28 @@
 /** A stored row: the sync columns, the type's own columns, and `content` (an object). */
 export type Row = Record<string, unknown>;
 
-/** Who a unit of work is for (ADR 0009). Version 2.0 has person scopes; system scopes come with their intents. */
-export interface Scope {
-  /** The signed-in person's id, as the app's auth verified it. The engine trusts it and does nothing else with tokens. */
+/** A unit for one signed-in person: their id, as the app's auth verified it. The engine does nothing else with tokens. */
+export interface PersonScope {
   readonly person: string;
 }
 
+/**
+ * A unit for work that isn't one person's (ADR 0009): a system intent the app declared, by name, and who asked for it
+ * when someone did (an owner). It may touch only the types its declaration names, and every intent in it is audited.
+ */
+export interface SystemScope {
+  readonly system: string;
+  readonly by?: string;
+}
+
+export type Scope = PersonScope | SystemScope;
+
+export const isSystem = (s: Scope): s is SystemScope => typeof (s as SystemScope).system === 'string';
+
 /** How an app's data is laid out: today's tables, adopted as they are (ADR 0006). */
 export interface Layout {
+  /** Every table the app declared beyond the record types (server and shared types), so a backend refuses others. */
+  readonly tables?: readonly string[];
   /** Where the record tables, the change counter, the op log and prefs live (a Postgres schema). */
   readonly schema: string;
   /** The record types, one table each. */
@@ -42,7 +56,36 @@ export interface Tombstone {
   clientUpdatedAt: string | null;
 }
 
-/** One unit of work's view of the database: a transaction, kept to one person. */
+/** One condition on a column. The core builds these from declared fields only; the backend writes them as it must. */
+export type Cond =
+  | { col: string; op: 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte'; value: unknown }
+  | { col: string; op: 'in'; value: readonly unknown[] }
+  | { col: string; op: 'null' | 'notnull' };
+
+/** A read of rows from one table (ADR 0003's find and count). */
+export interface Query {
+  table: string;
+  /** Keep to this person's rows (through `personColumn`), or null for no person filter (system units, app-wide types). */
+  person: string | null;
+  personColumn: string;
+  where: readonly Cond[];
+  /** Order by one column, then by `key` to break ties; and continue after these values (a cursor), when given. */
+  order?: { col: string; desc: boolean };
+  key: readonly string[];
+  after?: readonly unknown[];
+  limit?: number;
+}
+
+/** What a system unit did, for the audit log (ADR 0009). Counts and names only, never content. */
+export interface AuditEntry {
+  intent: string;
+  by: string | null;
+  type: string;
+  action: 'get' | 'find' | 'count' | 'put' | 'update' | 'remove';
+  rows: number;
+}
+
+/** One unit of work's view of the database: a transaction, kept to one person (or a declared system intent). */
 export interface Unit {
   /** Runs `fn` so that if it throws, only what it did is undone (a savepoint inside the unit). */
   savepoint<R>(fn: (u: Unit) => Promise<R>): Promise<R>;
@@ -76,6 +119,19 @@ export interface Unit {
   getPrefs(lock?: boolean): Promise<{ data: unknown; version: number } | null>;
   /** Writes the prefs document: the first version, or the next one; returns the new version. */
   putPrefs(data: unknown, existed: boolean): Promise<number>;
+
+  /** Rows matching a query (any table the app declared). */
+  select(q: Query): Promise<Row[]>;
+  /** How many rows match a query (its order, cursor and limit are ignored). */
+  count(q: Query): Promise<number>;
+  /** Writes one row; returns it as stored. A refused write throws RuleError. */
+  insert(table: string, row: Row): Promise<Row>;
+  /** Changes the row matching `match` (all conditions); returns it as stored, or null when none matches. */
+  update(table: string, match: readonly Cond[], cols: Row): Promise<Row | null>;
+  /** Removes the rows matching `match`; returns how many. */
+  remove(table: string, match: readonly Cond[]): Promise<number>;
+  /** Records one audited intent of a system unit. */
+  audit(entry: AuditEntry): Promise<void>;
 }
 
 /** A backend's connection for one request (on Cloudflare Workers, nothing outlives a request). */

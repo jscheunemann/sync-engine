@@ -9,8 +9,10 @@
 //   ctx.waitUntil(session.close());
 //
 // The rules are version 1's (server.ts) unchanged: the contract tests run the same cases against both.
-import { RuleError } from "./backend.js";
-export { RuleError } from "./backend.js";
+import { isSystem, RuleError } from "./backend.js";
+import { conditions, cursor, EngineError, fits, out } from "./declare.js";
+export { RuleError, isSystem } from "./backend.js";
+export { EngineError } from "./declare.js";
 export const plain = {
     vaultEnabled: async () => false,
     openRow: async (_type, row) => row,
@@ -30,17 +32,32 @@ export const BULK_ROWS = 500;
 /** The engine for an app's records on a backend. Make it once; connect per request. */
 export function createEngine(opts) {
     const { store, backend } = opts;
+    const types = opts.types ?? {};
+    const system = opts.system ?? {};
+    for (const name of Object.keys(types))
+        if (store.types.includes(name))
+            throw new EngineError('type_declared_twice', name);
+    for (const [name, d] of Object.entries(system))
+        for (const t of [...(d.read ?? []), ...(d.write ?? [])])
+            if (!types[t] && !store.isType(t))
+                throw new EngineError('unknown_type', `${name}.${t}`);
+    checkTypes(types);
+    const tables = Object.entries(types).map(([name, d]) => d.table ?? name);
     return {
         store,
         connect(settings) {
-            const conn = backend.connect(settings, { schema: store.schema, types: store.types });
+            const conn = backend.connect(settings, { schema: store.schema, types: store.types, tables });
             return {
                 work: (scope, fn, o) => {
-                    if (!scope || typeof scope.person !== 'string' || !scope.person)
+                    if (isSystem(scope)) {
+                        if (!system[scope.system])
+                            throw new EngineError('unknown_system_intent', scope.system);
+                    }
+                    else if (!scope || typeof scope.person !== 'string' || !scope.person)
                         throw new Error('scope_required');
                     const crypto = o?.crypto ?? plain;
                     return conn.unit(scope, async (u) => {
-                        const core = new Core(store, crypto, u);
+                        const core = new Core(store, types, system, scope, crypto, u);
                         await crypto.prepare?.(core.reader(u));
                         return fn(core.work());
                     });
@@ -50,6 +67,8 @@ export function createEngine(opts) {
         },
     };
 }
+/** A value as a cursor keeps it: times as ISO strings, change numbers as text. */
+const jsonValue = (v) => (v instanceof Date ? v.toISOString() : typeof v === 'bigint' ? v.toString() : v);
 const opAad = (opId) => `op|${opId}`;
 const invalid = (op, problems) => ({ op_id: op.op_id, status: 'invalid', type: op.type, id: op.id, problems });
 const createdAtOk = (createdAt, now) => {
@@ -63,44 +82,305 @@ export function fieldsFrom(store, type, rec) {
         out[name] = rec[name] ?? null;
     return out;
 }
+const RECORD_COLUMNS = { id: 'id', rev: 'number', created_at: 'time', updated_at: 'time', deleted_at: 'time' };
+const FIND_LIMIT = 100;
+/** The engine's own tables in an app's schema: never an app's declared type. */
+const ENGINE_TABLES = ['counters', 'applied_ops', 'prefs', 'engine_audit'];
+const FIND_MAX = 1000;
+/** Checks an app's declared types once, when the engine is made. */
+function checkTypes(types) {
+    for (const [name, d] of Object.entries(types)) {
+        if (!['person', 'shared', 'system'].includes(d.access))
+            throw new EngineError('bad_access', name);
+        if (ENGINE_TABLES.includes(d.table ?? name))
+            throw new EngineError('engine_table', name);
+        for (const k of [...d.key, ...(d.query ?? []), ...(d.sealed ?? []), ...(d.version ? [d.version] : [])])
+            if (!d.fields[k])
+                throw new EngineError('undeclared_field', `${name}.${k}`);
+        for (const k of d.sealed ?? [])
+            if (d.fields[k] !== 'json')
+                throw new EngineError('sealed_not_json', `${name}.${k}`);
+        if (d.version && d.fields[d.version] !== 'number')
+            throw new EngineError('version_not_number', `${name}.${d.version}`);
+        if (d.access === 'person' && d.fields[d.personColumn ?? 'user_id'])
+            throw new EngineError('person_column_declared', `${name}.${d.personColumn ?? 'user_id'}`);
+    }
+}
 /** The rules, on one unit. */
 class Core {
     store;
+    types;
     crypto;
     u;
-    constructor(store, crypto, u) {
+    /** The scope's person, or null in a system unit. */
+    person;
+    intent;
+    constructor(store, types, system, scope, crypto, u) {
         this.store = store;
+        this.types = types;
         this.crypto = crypto;
         this.u = u;
+        if (isSystem(scope)) {
+            this.person = null;
+            this.intent = { name: scope.system, by: scope.by ?? null, decl: system[scope.system] };
+        }
+        else {
+            this.person = scope.person;
+            this.intent = null;
+        }
     }
     check(type) {
         if (!this.store.isType(type))
             throw new Error('unknown_type');
     }
+    /** Records, prefs and the change feed are one person's: a system unit reaches records only through find and count. */
+    personOnly() {
+        if (this.person === null)
+            throw new EngineError('person_scope_only');
+    }
+    shape(type) {
+        if (this.store.isType(type)) {
+            const fields = { ...RECORD_COLUMNS, ...(this.store.queryColumns?.(type) ?? {}) };
+            const queryable = new Map(Object.entries(fields).map(([n, k]) => [n, { col: n, kind: k }]));
+            return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable };
+        }
+        const d = this.types[type];
+        if (!d)
+            throw new EngineError('unknown_type', type);
+        const queryable = new Map();
+        for (const n of [...d.key, ...(d.query ?? [])])
+            queryable.set(n, { col: n, kind: d.fields[n] });
+        return { name: type, table: d.table ?? type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
+    }
+    /** Whether this unit may read or write a type (ADR 0009); the person filter a query takes when it may. */
+    allow(sh, write) {
+        if (this.intent) {
+            const d = this.intent.decl;
+            const ok = write ? (d.write ?? []).includes(sh.name) : [...(d.read ?? []), ...(d.write ?? [])].includes(sh.name);
+            if (!ok)
+                throw new EngineError('not_permitted', sh.name);
+            return null;
+        }
+        if (sh.access === 'system')
+            throw new EngineError('system_only', sh.name);
+        if (sh.access === 'shared') {
+            if (write)
+                throw new EngineError('system_only', sh.name);
+            return null;
+        }
+        return this.person;
+    }
+    async audit(sh, action, rows) {
+        if (this.intent)
+            await this.u.audit({ intent: this.intent.name, by: this.intent.by, type: sh.name, action, rows });
+    }
+    aad(sh, field, row) {
+        if (sh.decl?.aad)
+            return sh.decl.aad(field, row);
+        return [sh.name, ...sh.key.map((k) => String(row[k] ?? '')), field].join('|');
+    }
+    /** A stored row of a declared type as the app gets it: declared fields, by kind, sealed ones opened. */
+    async outRow(sh, row) {
+        const o = {};
+        for (const [n, k] of Object.entries(sh.fields))
+            o[n] = out(k, row[n]);
+        if (sh.access === 'person' && this.person === null)
+            o[sh.personColumn] = out('id', row[sh.personColumn]);
+        for (const f of sh.decl?.sealed ?? [])
+            if (o[f] !== null)
+                o[f] = await this.crypto.openDoc(this.aad(sh, f, o), o[f]);
+        return o;
+    }
+    async find(u, type, opts = {}) {
+        const sh = this.shape(type);
+        const person = this.allow(sh, false);
+        const where = conditions(opts.where, sh.queryable);
+        let order;
+        if (opts.order !== undefined) {
+            const desc = opts.order.startsWith('-');
+            const name = desc ? opts.order.slice(1) : opts.order;
+            const f = sh.queryable.get(name);
+            if (!f)
+                throw new EngineError('not_queryable', name);
+            if (!sh.key.includes(name) || sh.key.length > 1)
+                order = { col: f.col, desc };
+            else if (desc)
+                order = { col: f.col, desc };
+        }
+        const limit = opts.limit ?? FIND_LIMIT;
+        if (!Number.isInteger(limit) || limit < 1 || limit > FIND_MAX)
+            throw new EngineError('bad_limit');
+        const after = opts.after !== undefined ? cursor.read(opts.after) : undefined;
+        if (after && after.length !== sh.key.length + (order ? 1 : 0))
+            throw new EngineError('bad_cursor');
+        const rows = await u.select({ table: sh.table, person, personColumn: sh.personColumn, where, order, key: sh.key, after, limit: limit + 1 });
+        const page = rows.slice(0, limit);
+        const last = page[page.length - 1];
+        const next = rows.length > limit && last ? cursor.make([...(order ? [jsonValue(last[order.col])] : []), ...sh.key.map((k) => jsonValue(last[k]))]) : null;
+        await this.audit(sh, 'find', page.length);
+        if (sh.record) {
+            const t = type;
+            return { rows: await Promise.all(page.map(async (r) => this.store.toRecord(t, await this.crypto.openRow(t, r)))), next };
+        }
+        return { rows: await Promise.all(page.map((r) => this.outRow(sh, r))), next };
+    }
+    async count(u, type, opts = {}) {
+        const sh = this.shape(type);
+        const person = this.allow(sh, false);
+        const n = await u.count({ table: sh.table, person, personColumn: sh.personColumn, where: conditions(opts.where, sh.queryable), key: sh.key });
+        await this.audit(sh, 'count', n);
+        return n;
+    }
+    /** A declared type, for a write: records are written only through apply. */
+    writable(type) {
+        const sh = this.shape(type);
+        if (sh.record)
+            throw new EngineError('records_use_apply', type);
+        return { sh, person: this.allow(sh, true) };
+    }
+    /** Columns from what the app gave: declared fields only, each of its kind, sealed ones sealed. */
+    async columns(sh, given, keyRow) {
+        const c = {};
+        for (const [n, v] of Object.entries(given)) {
+            const kind = sh.fields[n];
+            if (!kind)
+                throw new EngineError('unknown_field', n);
+            if (v === undefined)
+                continue;
+            if (!fits(kind, v))
+                throw new EngineError('bad_value', n);
+            c[n] = (sh.decl?.sealed ?? []).includes(n) && v !== null ? await this.crypto.sealDoc(this.aad(sh, n, { ...keyRow, ...given }), v) : v;
+        }
+        return c;
+    }
+    keyMatch(sh, key, person) {
+        const names = Object.keys(key);
+        if (names.length !== sh.key.length || !sh.key.every((k) => names.includes(k)))
+            throw new EngineError('bad_key', sh.name);
+        const m = sh.key.map((k) => {
+            if (!fits(sh.fields[k], key[k]) || key[k] === null)
+                throw new EngineError('bad_value', k);
+            return { col: k, op: 'eq', value: key[k] };
+        });
+        if (sh.access === 'person') {
+            const who = person ?? key[sh.personColumn];
+            if (person === null && (typeof who !== 'string' || !who))
+                throw new EngineError('person_required', sh.personColumn);
+            m.push({ col: sh.personColumn, op: 'eq', value: who });
+        }
+        return m;
+    }
+    refused(e) {
+        if (e instanceof RuleError)
+            throw new EngineError(e.kind === 'reference' ? 'reference' : 'refused', e.rule || undefined);
+        throw e;
+    }
+    async put(type, given) {
+        const { sh, person } = this.writable(type);
+        const row = { ...given };
+        let who = person;
+        if (sh.access === 'person') {
+            if (person === null) {
+                who = row[sh.personColumn];
+                if (typeof who !== 'string' || !who)
+                    throw new EngineError('person_required', sh.personColumn);
+            }
+            else if (row[sh.personColumn] !== undefined && row[sh.personColumn] !== person)
+                throw new EngineError('not_yours', sh.personColumn);
+            delete row[sh.personColumn];
+        }
+        const c = await this.columns(sh, row, row);
+        if (sh.decl?.version && c[sh.decl.version] === undefined)
+            c[sh.decl.version] = 1;
+        if (sh.access === 'person')
+            c[sh.personColumn] = who;
+        try {
+            const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c));
+            await this.audit(sh, 'put', 1);
+            return this.outRow(sh, stored);
+        }
+        catch (e) {
+            this.refused(e);
+        }
+    }
+    async update(type, key, changes, version) {
+        const { sh, person } = this.writable(type);
+        const match = this.keyMatch(sh, key, person);
+        const keyRow = Object.fromEntries(sh.key.map((k) => [k, key[k]]));
+        for (const k of [...sh.key, sh.personColumn])
+            if (k in changes)
+                throw new EngineError('key_field', k);
+        const vcol = sh.decl?.version;
+        if (vcol && vcol in changes)
+            throw new EngineError('key_field', vcol);
+        if (vcol && (typeof version !== 'number' || !Number.isInteger(version)))
+            throw new EngineError('version_required', vcol);
+        const c = await this.columns(sh, changes, keyRow);
+        if (vcol)
+            c[vcol] = version + 1;
+        const guarded = vcol ? [...match, { col: vcol, op: 'eq', value: version }] : match;
+        let row;
+        try {
+            row = await this.u.savepoint((sp) => sp.update(sh.table, guarded, c));
+        }
+        catch (e) {
+            this.refused(e);
+        }
+        await this.audit(sh, 'update', row ? 1 : 0);
+        if (row)
+            return { status: 'applied', row: await this.outRow(sh, row) };
+        if (!vcol)
+            return { status: 'not_found' };
+        const [current] = await this.u.select({ table: sh.table, person: null, personColumn: sh.personColumn, where: match, key: sh.key, limit: 1 });
+        return current ? { status: 'conflict', current: await this.outRow(sh, current) } : { status: 'not_found' };
+    }
+    async remove(type, key) {
+        const { sh, person } = this.writable(type);
+        const match = this.keyMatch(sh, key, person);
+        let n;
+        try {
+            n = await this.u.savepoint((sp) => sp.remove(sh.table, match));
+        }
+        catch (e) {
+            this.refused(e);
+        }
+        await this.audit(sh, 'remove', n);
+        return n > 0;
+    }
     reader(u) {
         return {
             get: async (type, id) => {
+                this.personOnly();
                 this.check(type);
                 const row = await u.getRow(type, id);
                 return row ? this.store.toRecord(type, await this.crypto.openRow(type, row)) : null;
             },
             getMany: async (type, ids) => {
+                this.personOnly();
                 this.check(type);
                 if (!ids.length)
                     return [];
                 const rows = await u.getRows(type, ids);
                 return Promise.all(rows.map(async (r) => this.store.toRecord(type, await this.crypto.openRow(type, r))));
             },
+            find: ((type, opts) => this.find(u, type, opts)),
+            count: (type, opts) => this.count(u, type, opts),
         };
     }
     work() {
         const r = this.reader(this.u);
+        const p = () => this.personOnly();
         return {
             get: r.get,
             getMany: r.getMany,
-            apply: (ops, now) => this.apply(ops, now ?? new Date().toISOString()),
-            changes: (since, limit) => this.changes(since, limit),
-            prefs: { get: () => this.getPrefs(), put: (data, base) => this.putPrefs(data, base) },
+            find: r.find,
+            count: r.count,
+            apply: (ops, now) => (p(), this.apply(ops, now ?? new Date().toISOString())),
+            changes: (since, limit) => (p(), this.changes(since, limit)),
+            prefs: { get: () => (p(), this.getPrefs()), put: (data, base) => (p(), this.putPrefs(data, base)) },
+            put: (type, row) => this.put(type, row),
+            update: (type, key, changes, version) => this.update(type, key, changes, version),
+            remove: (type, key) => this.remove(type, key),
         };
     }
     async record(u, type, id, lock) {

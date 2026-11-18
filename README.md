@@ -50,7 +50,8 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 
 Following `docs/adr/` 0002 to 0011, an app gives the engine connection settings and intents; the engine owns the
 driver, the SQL, transactions and per-person isolation. Nothing database-shaped crosses: no SQL, connection or driver
-types. Part 1 (this): the core and the Postgres backend, on today's tables.
+types. Part 1: the core and the Postgres backend, on today's tables. Part 2 (this): declared types, find and count,
+and system intents with their audit (ADR 0012).
 
 ```ts
 import { createEngine } from '@jscheunemann/sync-engine/engine';
@@ -69,6 +70,31 @@ ctx.waitUntil(session.close());
 - The Postgres driver is the engine's own dependency: apps don't install or upgrade it for the engine.
 - `test/contract.test.ts` runs every case of version 1's server test through this API, and isolation with row-level
   security off.
+
+Tables the app's server writes are declared, and reached by intents on declared fields only:
+
+```ts
+const engine = createEngine({
+  store, backend: postgres,
+  types: {
+    data_keys: { access: 'person', key: ['version'], fields: { version: 'number', wrapped: 'text', created_at: 'time' } },
+    invitations: { access: 'system', key: ['id'], fields: { id: 'id', code: 'text', email: 'text', redeemed_at: 'time' }, query: ['code'] },
+    signup_settings: { access: 'shared', key: ['id'], fields: { id: 'id', open: 'boolean' } },
+  },
+  system: { redeem_invitation: { write: ['invitations'] } },
+});
+const session = engine.connect({ url, role: 'app_api', systemRole: 'app_system' });
+await session.work({ person }, (w) => w.find('data_keys', { order: '-version', limit: 1 }));
+await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations', { where: { code, redeemed_at: { is: null } } }));
+```
+
+- `w.find(type, { where, order, limit, after })` → `{ rows, next }`; `w.count(type, { where })`.
+- `w.put(type, row)`, `w.update(type, key, changes, version?)` (`applied`, `conflict` with the current row, or
+  `not_found`), `w.remove(type, key)`.
+- `person` types are each person's; `shared` types are read by anyone and written by system intents; `system` types
+  only by system intents. A system intent touches only the types it declares, and each intent it runs is written to
+  `<schema>.engine_audit` (no values).
+- Refusals are `EngineError`s: a code and a field, never a value.
 
 ## Using it
 
