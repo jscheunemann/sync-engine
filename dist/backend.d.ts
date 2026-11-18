@@ -1,0 +1,80 @@
+/** A stored row: the sync columns, the type's own columns, and `content` (an object). */
+export type Row = Record<string, unknown>;
+/** Who a unit of work is for (ADR 0009). Version 2.0 has person scopes; system scopes come with their intents. */
+export interface Scope {
+    /** The signed-in person's id, as the app's auth verified it. The engine trusts it and does nothing else with tokens. */
+    readonly person: string;
+}
+/** How an app's data is laid out: today's tables, adopted as they are (ADR 0006). */
+export interface Layout {
+    /** Where the record tables, the change counter, the op log and prefs live (a Postgres schema). */
+    readonly schema: string;
+    /** The record types, one table each. */
+    readonly types: readonly string[];
+}
+/** A database rule refused a write (a check, a unique key, a reference). The core decides what that means for the op. */
+export declare class RuleError extends Error {
+    /** The rule's name, when the database gives one (a constraint name). */
+    readonly rule: string;
+    /** `reference`: a row it points at is missing; `rule`: anything else (a check, a unique key, not null). */
+    readonly kind: 'reference' | 'rule';
+    constructor(rule: string, kind: 'reference' | 'rule');
+}
+/** One tombstone to write in bulk: the record, its new change number, and the device's time for the change. */
+export interface Tombstone {
+    id: string;
+    rev: bigint;
+    clientUpdatedAt: string | null;
+}
+/** One unit of work's view of the database: a transaction, kept to one person. */
+export interface Unit {
+    /** Runs `fn` so that if it throws, only what it did is undone (a savepoint inside the unit). */
+    savepoint<R>(fn: (u: Unit) => Promise<R>): Promise<R>;
+    /** One record's row, or null. `lock` holds it until the unit ends. */
+    getRow(type: string, id: string, lock?: boolean): Promise<Row | null>;
+    /** Several records' rows (those that exist), in no particular order. */
+    getRows(type: string, ids: readonly string[], lock?: boolean): Promise<Row[]>;
+    /** Writes new rows (each with its `rev` and `content`); returns them as stored. A refused write throws RuleError. */
+    insertRows(type: string, rows: readonly Row[]): Promise<Row[]>;
+    /** Changes one row's columns (and `content`); returns it as stored. A refused write throws RuleError. */
+    updateRow(type: string, id: string, cols: Row): Promise<Row>;
+    /** Tombstones rows in one go: deleted_at and updated_at `now`, version + 1, each its own rev; returns them as stored. */
+    tombstoneRows(type: string, items: readonly Tombstone[], now: string): Promise<Row[]>;
+    /** Reserves `n` change numbers in a row for the person and returns the first. */
+    nextRevs(n: number): Promise<bigint>;
+    /** The change number below which tombstones have been cleaned up (0 when never). */
+    purgedRev(): Promise<number>;
+    /** Rows of any of `types` changed after `since`, in change order, at most `limit`. */
+    changesSince(types: readonly string[], since: number, limit: number): Promise<{
+        type: string;
+        row: Row;
+    }[]>;
+    /** The kept result of an op, if it was applied before. */
+    appliedResult(opId: string): Promise<unknown | undefined>;
+    /** Which of these ops were applied before. */
+    appliedOpIds(opIds: readonly string[]): Promise<Set<string>>;
+    /** Keeps ops' results, so a repeat returns them. */
+    saveResults(list: readonly {
+        op_id: string;
+        result: unknown;
+    }[]): Promise<void>;
+    /** The person's prefs document and its version, or null when there is none. `lock` holds it until the unit ends. */
+    getPrefs(lock?: boolean): Promise<{
+        data: unknown;
+        version: number;
+    } | null>;
+    /** Writes the prefs document: the first version, or the next one; returns the new version. */
+    putPrefs(data: unknown, existed: boolean): Promise<number>;
+}
+/** A backend's connection for one request (on Cloudflare Workers, nothing outlives a request). */
+export interface Connection {
+    /** Opens a unit (a transaction) for `scope` and runs `fn` in it; commits if it returns, rolls back if it throws. */
+    unit<R>(scope: Scope, fn: (u: Unit) => Promise<R>): Promise<R>;
+    /** Lets the connection go. */
+    close(): Promise<void>;
+}
+/** A database the engine can run on (ADR 0004). `S` is its connection settings. */
+export interface Backend<S> {
+    readonly kind: string;
+    connect(settings: S, layout: Layout): Connection;
+}
