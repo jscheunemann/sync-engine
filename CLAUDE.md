@@ -8,6 +8,8 @@ The record sync shared by **Clearwork** (github.com/jscheunemann/clearwork) and 
 - **Both apps run this code.** A change in behaviour is a change in both apps' sync. Anything that changes what a device
   or the server does (merge rules, what's pushed, conflict handling, the protocol) is a new **major** version and needs
   the owner's go-ahead; additions that change nothing for existing callers are a minor version; fixes a patch.
+- **Pull requests:** label fixes and additions (patch and minor versions) `automerge`; CI merges them once `test` and
+  `driver` pass. A major version gets no label: it waits for the owner.
 - **Apps install it from a git tag** (`github:jscheunemann/sync-engine#vX.Y.Z`). After a change: bump `version` in
   `package.json`, `npm run build`, commit `dist/` with the source, and merge: the `tag` workflow then tags `vX.Y.Z`
   on `main` (a version already tagged is left alone).
