@@ -50,26 +50,41 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 
 Following `docs/adr/` 0002 to 0011, an app gives the engine connection settings and intents; the engine owns the
 driver, the SQL, transactions and per-person isolation. Nothing database-shaped crosses: no SQL, connection or driver
-types. Part 1: the core and the Postgres backend, on today's tables. Part 2 (this): declared types, find and count,
-and system intents with their audit (ADR 0012).
+types. Part 1: the core and the Postgres backend, on today's tables. Part 2: declared types, find and count, and
+system intents with their audit (ADR 0012). Part 3: one backend for Postgres.js 3 and 4 (ADR 0013). Part 4:
+records and tables from declarations (ADR 0014). Part 5 (this): SQLite, a test backend, passes the same contract
+(ADR 0015).
 
 ```ts
 import { createEngine } from '@jscheunemann/sync-engine/engine';
 import { postgres } from '@jscheunemann/sync-engine/postgres';
 
 const engine = createEngine({ store, backend: postgres });                       // once
-const session = engine.connect({ url: env.HYPERDRIVE.connectionString });        // per request
+const session = engine.connect({ url: env.HYPERDRIVE.connectionString, schema: 'app' }); // per request
 const results = await session.work({ person }, (w) => w.apply(ops), { crypto }); // a unit of work
 const page = await session.work({ person }, (w) => w.changes(since, 500));
 ctx.waitUntil(session.close());
+```
+
+A record type is declared, not mapped: the engine stores it.
+
+```ts
+const store: RecordStore<'tasks'> = {
+  types: ['tasks'],
+  fields: { tasks: { title: 'text', size: 'integer', due: 'json', tags: 'ids', notes: { kind: 'text', content: true } } },
+  validate: (type, fields, id, { sealed }) => [],   // the app's rules; defaults, checkChanges, normalize, crossChecks optional
+};
+const plan = await engine.plan(adminSettings);    // the steps and any conflicts, to read; changes nothing
+await engine.migrate(adminSettings, plan);        // refused if out of date or conflicted; all steps or none
 ```
 
 - `w.apply(ops)` applies ops with version 1's rules; all new records, or all plain deletes, go in bulk by themselves.
 - `w.changes`, `w.get`, `w.getMany`, `w.prefs.get` / `w.prefs.put`; everything in one `work` lands together.
 - An app's hooks get a reader, never a connection: `crossChecks(read, …)`, `ContentCrypto.prepare(read)`.
 - The Postgres driver is the engine's own dependency: apps don't install or upgrade it for the engine.
-- `test/contract.test.ts` runs every case of version 1's server test through this API, and isolation with row-level
-  security off.
+- `test/contract.test.ts` runs every case of version 1's server test through this API, isolation by the engine alone,
+  and every field kind, on Postgres and on SQLite (`test/sqlite-backend.ts`, tests only); `test/intents.test.ts` the
+  intents for declared types on both.
 
 Tables the app's server writes are declared, and reached by intents on declared fields only:
 
@@ -94,6 +109,9 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 - `person` types are each person's; `shared` types are read by anyone and written by system intents; `system` types
   only by system intents. A system intent touches only the types it declares, and each intent it runs is written to
   `<schema>.engine_audit` (no values).
+- `w.summarize(type, { where, by, measures, order, limit })`: groups (fields, JSON `paths`, or `{ day, zone }`) with
+  `count`, `distinct`, `sum`, `avg`, `min`, `max` and `percentile`, each with its own `where` if wanted (ADR 0016).
+- `w.put(type, row, { onConflict: 'update' | 'nothing' })` for insert-or-update; `w.lock(name)` for the rest of the unit.
 - Refusals are `EngineError`s: a code and a field, never a value.
 
 ## Using it

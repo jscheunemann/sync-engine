@@ -1,6 +1,7 @@
 // Intents for declared types (ADRs 0003, 0009, 0010): find and count on declared fields, put/update/remove, shared and
-// system types, and system intents with their audit. The same contract runs on the in-memory backend (always) and on
-// Postgres (with TEST_DATABASE_URL), with row-level security on, so a backend can't pass by its database alone.
+// system types, and system intents with their audit. The same contract runs on SQLite (always, tables from the
+// declarations) and on Postgres (with TEST_DATABASE_URL), with row-level security on, so a backend can't pass by its
+// database alone.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
@@ -9,24 +10,19 @@ import { EngineError, createEngine, type ContentCrypto, type RecordStore, type R
 import { cursor } from '../src/declare.ts';
 import { uuidv7 } from '../src/ids.ts';
 import { postgres } from '../src/postgres.ts';
-import { memoryBackend, type Memory } from './memory-backend.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { sqlite, sqliteRows } from './sqlite-backend.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'notes';
 
-/** No record types are used here; the engine needs a store all the same. */
-const store = (schema: string): RecordStore<T> => ({
-  schema,
+/** Records, declared: found here by their columns (the rest of their contract is test/contract.test.ts). */
+const store = (): RecordStore<T> => ({
   types: ['notes'],
-  isType: (t): t is T => t === 'notes',
-  fieldNames: () => [],
-  contentFields: () => [],
-  defaults: () => ({}),
-  checkChanges: () => [],
-  normalize: (_t, f) => f,
+  fields: { notes: { title: 'text', tags: 'ids', due: 'json', body: { kind: 'json', content: true } } },
   validate: () => [],
-  toColumns: () => ({ content: {} }),
-  toRecord: (_t, r) => r as never,
 });
 
 const types: Record<string, TypeDecl> = {
@@ -41,9 +37,18 @@ const types: Record<string, TypeDecl> = {
   keys: { access: 'person', key: ['version'], fields: { version: 'number', wrapped: 'text' } },
   settings: { access: 'shared', key: ['name'], fields: { name: 'text', value: 'json' } },
   invitations: { access: 'system', key: ['id'], fields: { id: 'id', code: 'text', email: 'text', redeemed_at: 'time' }, query: ['code', 'redeemed_at'] },
+  events: {
+    access: 'system',
+    key: ['id'],
+    fields: { id: 'id', viewer: 'text', sid: 'text', t: 'time', a: 'text', tab: 'text', e: 'json' },
+    query: ['viewer', 'sid', 't', 'a', 'tab'],
+    paths: { name: { from: 'e', path: ['name'], kind: 'text' }, dur: { from: 'e', path: ['dur'], kind: 'number' }, test: { from: 'e', path: ['test'], kind: 'boolean' } },
+  },
+  viewers: { access: 'system', key: ['viewer'], fields: { viewer: 'text', first_seen: 'time', last_seen: 'time', os: 'text' } },
 };
 const system: Record<string, SystemDecl> = {
   invite: { write: ['invitations'] },
+  analytics: { write: ['events', 'viewers'] },
   owner_report: { read: ['docs', 'settings'] },
   set_signup: { write: ['settings'] },
 };
@@ -239,31 +244,82 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.equal(await sys('invite')((w) => w.count('invitations', { where: { code: 'ZZZZ-ZZZZ-ZZZZ' } })), 0);
     });
 
+    test('summaries: groups (fields, JSON paths, a local day), counts, distinct and conditional counts, sums, percentiles, order and limit', async () => {
+      const ev = (viewer: string, sid: string, t: string, a: string, tab: string | null, e: Row) => sys('analytics')((w) => w.put('events', { id: uuidv7(), viewer, sid, t, a, tab, e }));
+      // Two viewers over two New York days (the 03:30Z event is still the 19th there).
+      await ev('v1', 's1', '2026-11-19T15:00:00.000Z', 'view', 'today', {});
+      await ev('v1', 's1', '2026-11-19T15:01:00.000Z', 'dwell', 'today', { dur: 1000 });
+      await ev('v1', 's1', '2026-11-19T15:02:00.000Z', 'dwell', 'today', { dur: 3000 });
+      await ev('v2', 's2', '2026-11-20T03:30:00.000Z', 'dwell', 'plan', { dur: 'not a number' });
+      await ev('v2', 's2', '2026-11-20T15:00:00.000Z', 'unplanned', null, { name: 'swim' });
+      await ev('v2', 's3', '2026-11-20T16:00:00.000Z', 'unplanned', null, { name: 'swim' });
+      await ev('v2', 's3', '2026-11-20T16:01:00.000Z', 'error', 'plan', { test: true });
+      const live = { test: { ne: true } };
+      const [totals] = await sys('analytics')((w) => w.summarize('events', { where: live, measures: { viewers: { distinct: 'viewer' }, sessions: { distinct: 'sid' }, events: { count: true }, errors: { count: true, where: { a: 'error' } } } }));
+      assert.deepEqual(totals, { viewers: 2, sessions: 3, events: 6, errors: 0 }, 'the test event is left out; a missing flag is not true');
+      const daily = await sys('analytics')((w) => w.summarize('events', { by: [{ day: 't', zone: 'America/New_York', as: 'day' }], measures: { events: { count: true } }, order: 'day' }));
+      assert.deepEqual(daily, [{ day: '2026-11-19', events: 4 }, { day: '2026-11-20', events: 3 }]);
+      const dwell = await sys('analytics')((w) => w.summarize('events', { where: { a: 'dwell' }, by: ['tab'], measures: { ms: { sum: 'dur' }, visits: { count: true }, p50: { percentile: 'dur', p: 0.5 }, p75: { percentile: 'dur', p: 0.75 } }, order: '-visits' }));
+      assert.deepEqual(dwell, [{ tab: 'today', ms: 4000, visits: 2, p50: 2000, p75: 2500 }, { tab: 'plan', ms: null, visits: 1, p50: null, p75: null }]);
+      const named = await sys('analytics')((w) => w.summarize('events', { where: { a: { nin: ['view', 'dwell', 'error'] } }, by: ['name'], measures: { n: { count: true }, first: { min: 't' } }, order: '-n', limit: 1 }));
+      assert.deepEqual(named, [{ name: 'swim', n: 2, first: '2026-11-20T15:00:00.000Z' }]);
+      assert.equal((await sys('analytics')((w) => w.find('events', { where: { name: 'swim' } }))).rows.length, 2, 'a path is a query field');
+      await code(sys('analytics')((w) => w.summarize('events', { measures: { s: { sum: 'a' } } })), 'not_a_number', 's');
+      await code(sys('analytics')((w) => w.summarize('events', { by: [{ day: 'a', zone: 'UTC' }], measures: { n: { count: true } } })), 'not_a_time', 'a');
+      await code(sys('analytics')((w) => w.summarize('events', { by: [{ day: 't', zone: 'Mars/Olympus' }], measures: { n: { count: true } } })), 'bad_zone');
+      await code(sys('analytics')((w) => w.summarize('events', { measures: { n: { count: true }, m: { distinct: 'e' } } })), 'not_queryable', 'e');
+      await code(as(A)((w) => w.summarize('events', { measures: { n: { count: true } } })), 'system_only', 'events');
+      const log = await r.audit();
+      assert.ok(log.some((x) => x.intent === 'analytics' && x.action === 'summarize'), 'summaries are audited');
+    });
+
+    test('put on a taken key: update, or leave it; a lock holds for the unit', async () => {
+      const first = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', first_seen: '2026-11-01T00:00:00.000Z', last_seen: '2026-11-01T00:00:00.000Z', os: 'ios' }));
+      assert.equal(first!.os, 'ios');
+      const updated = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', last_seen: '2026-11-18T00:00:00.000Z', os: 'android' }, { onConflict: 'update' }));
+      assert.deepEqual([updated!.first_seen, updated!.last_seen, updated!.os], ['2026-11-01T00:00:00.000Z', '2026-11-18T00:00:00.000Z', 'android'], 'only the given fields change');
+      assert.equal(await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', os: 'x' }, { onConflict: 'nothing' })), null);
+      await code(sys('analytics')((w) => w.put('viewers', { viewer: 'v9', os: 'x' })), 'refused');
+      // Two units after the same lock: the second waits for the first to end.
+      const order: string[] = [];
+      await Promise.all([
+        as(A)(async (w) => { await w.lock('tokens:A'); order.push('a1'); await new Promise((res) => setTimeout(res, 50)); order.push('a2'); }),
+        new Promise((res) => setTimeout(res, 10)).then(() => as(A)(async (w) => { await w.lock('tokens:A'); order.push('b'); })),
+      ]);
+      assert.deepEqual(order, ['a1', 'a2', 'b']);
+      await code(as(A)((w) => w.lock('')), 'bad_lock');
+    });
+
     test('errors carry a code and a field, never a value', async () => {
       const values = ['private text 1', 'someone-else@example.com'];
-      for (const p of [
-        as(A)((w) => w.put('docs', { id: uuidv7(), title: 123 as never, body: values[0] })),
-        as(A)((w) => w.find('docs', { where: { title: { in: [values[1], 4] } } })),
+      // One at a time: a refusal started early would go unhandled while the one before it is awaited.
+      for (const run of [
+        () => as(A)((w) => w.put('docs', { id: uuidv7(), title: 123 as never, body: values[0] })),
+        () => as(A)((w) => w.find('docs', { where: { title: { in: [values[1], 4] } } })),
       ])
-        await assert.rejects(p, (e: Error) => values.every((v) => !e.message.includes(v)));
+        await assert.rejects(run(), (e: Error) => values.every((v) => !e.message.includes(v)));
     });
   });
 }
 
-const keys = Object.fromEntries(Object.entries(types).map(([n, d]) => [n, d.access === 'person' ? ['user_id', ...d.key] : d.key]));
-
-contract('in memory', () => {
-  const mem: Memory = { tables: new Map(), audit: [], unique: new Map([['invitations', [['code']]]]) };
-  const engine = createEngine({ store: store('mem'), backend: memoryBackend(mem, keys), types, system });
-  return {
-    session: engine.connect({}),
-    raw: async (t) => structuredClone(mem.tables.get(t) ?? []),
-    audit: async () => mem.audit.map((a) => ({ ...a, by_person: a.by })),
-  };
-});
+// SQLite: the tables made from the declarations (plan and migrate), then the same contract.
+{
+  const path = join(mkdtempSync(join(tmpdir(), 'se2-int-')), 'intents.db');
+  const engine = createEngine({ store: store(), backend: sqlite, types, system });
+  let session: Session<T> | undefined;
+  contract('SQLite, tables from the declarations', () => {
+    session ??= engine.connect({ path });
+    return {
+      session,
+      raw: async (t) => sqliteRows(path, `select * from "${t}"`) as Row[],
+      audit: async () => sqliteRows(path, `select intent, by_person, type, action, rows from engine_audit order by id`) as Row[],
+    };
+  });
+  before(async () => engine.migrate({ path }, await engine.plan({ path })));
+}
 
 describe('declarations are checked when the engine is made', () => {
-  const mk = (t: Record<string, TypeDecl>, s: Record<string, SystemDecl> = {}) => () => createEngine({ store: store('x'), backend: postgres, types: t, system: s });
+  const mk = (t: Record<string, TypeDecl>, s: Record<string, SystemDecl> = {}) => () => createEngine({ store: store(), backend: postgres, types: t, system: s });
   const is = (c: string) => (e: unknown) => e instanceof EngineError && e.code === c;
   test('fields, keys, versions, sealing, engine tables and system intents', () => {
     assert.throws(mk({ a: { access: 'person', key: ['id'], fields: {} } }), is('undeclared_field'));
@@ -288,6 +344,8 @@ create table ${S}.docs (user_id uuid not null default ${S}.current_user_id(), id
 create table ${S}.keys (user_id uuid not null default ${S}.current_user_id(), version integer not null, wrapped text not null, primary key (user_id, version));
 create table ${S}.settings (name text primary key, value jsonb not null);
 create table ${S}.invitations (id uuid primary key, code text not null unique, email text not null, redeemed_at timestamptz);
+create table ${S}.events (id uuid primary key, viewer text, sid text, t timestamptz, a text, tab text, e jsonb);
+create table ${S}.viewers (viewer text primary key, first_seen timestamptz, last_seen timestamptz, os text);
 create table ${S}.engine_audit (id bigint generated always as identity primary key, at timestamptz not null default now(), intent text not null,
   by_person uuid, type text not null, action text not null, rows integer not null);
 grant usage on schema ${S} to se2_int_api, se2_int_sys;
@@ -301,17 +359,17 @@ create policy system on ${S}.${t} for all to se2_int_sys using (true) with check
 alter table ${S}.settings enable row level security; alter table ${S}.settings force row level security;
 create policy read on ${S}.settings for select to se2_int_api using (true);
 create policy system on ${S}.settings for all to se2_int_sys using (true) with check (true);
-revoke all on ${S}.invitations, ${S}.engine_audit from se2_int_api;
+revoke all on ${S}.invitations, ${S}.events, ${S}.viewers, ${S}.engine_audit from se2_int_api;
 `;
 
-let admin: pg.Sql | undefined;
+let admin: ReturnType<typeof pg> | undefined;
 let pgSession: Session<T> | undefined;
 const S = 'se2_int';
 contract(
   'Postgres, row-level security on',
   () => {
-    const engine = createEngine({ store: store(S), backend: postgres, types, system });
-    pgSession = engine.connect({ url: URL_!, max: 2, role: 'se2_int_api', systemRole: 'se2_int_sys' });
+    const engine = createEngine({ store: store(), backend: postgres, types, system });
+    pgSession = engine.connect({ url: URL_!, schema: S, max: 2, role: 'se2_int_api', systemRole: 'se2_int_sys' });
     return {
       session: pgSession,
       raw: async (t) => (await admin!.unsafe(`select * from ${S}.${t}`)) as unknown as Row[],

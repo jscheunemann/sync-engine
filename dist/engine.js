@@ -11,8 +11,29 @@
 // The rules are version 1's (server.ts) unchanged: the contract tests run the same cases against both.
 import { isSystem, RuleError } from "./backend.js";
 import { conditions, cursor, EngineError, fits, out } from "./declare.js";
+import { RecordType } from "./records.js";
 export { RuleError, isSystem } from "./backend.js";
 export { EngineError } from "./declare.js";
+export {} from "./records.js";
+function mapStore(store) {
+    const byType = new Map(store.types.map((t) => [t, new RecordType(t, store.fields[t] ?? {})]));
+    const rt = (t) => byType.get(t);
+    return {
+        types: store.types,
+        isType: (t) => typeof t === 'string' && byType.has(t),
+        type: rt,
+        fieldNames: (t) => rt(t).names,
+        contentFields: (t) => rt(t).content,
+        defaults: (t) => ({ ...rt(t).empty(), ...(store.defaults?.(t) ?? {}) }),
+        checkChanges: (t, c) => (store.checkChanges ? store.checkChanges(t, c) : rt(t).check(c)),
+        normalize: (t, f, now) => (store.normalize ? store.normalize(t, f, now) : { ...f }),
+        validate: (t, f, id, o) => store.validate(t, f, id, o),
+        ...(store.crossChecks ? { crossChecks: (r, t, id, f, d) => store.crossChecks(r, t, id, f, d) } : {}),
+        ...(store.bulkSafe ? { bulkSafe: (t) => store.bulkSafe(t) } : {}),
+        toRecord: (t, row) => rt(t).toRecord(row),
+        toColumns: (t, f) => rt(t).toColumns(f),
+    };
+}
 export const plain = {
     vaultEnabled: async () => false,
     openRow: async (_type, row) => row,
@@ -31,7 +52,8 @@ export class CursorExpired extends Error {
 export const BULK_ROWS = 500;
 /** The engine for an app's records on a backend. Make it once; connect per request. */
 export function createEngine(opts) {
-    const { store, backend } = opts;
+    const { backend } = opts;
+    const store = mapStore(opts.store);
     const types = opts.types ?? {};
     const system = opts.system ?? {};
     for (const name of Object.keys(types))
@@ -43,10 +65,41 @@ export function createEngine(opts) {
                 throw new EngineError('unknown_type', `${name}.${t}`);
     checkTypes(types);
     const tables = Object.entries(types).map(([name, d]) => d.table ?? name);
+    // Every table's columns by kind, for the backend to write each value as its kind and, in part 4b, to make the tables.
+    const columns = {};
+    for (const t of store.types)
+        columns[t] = { kinds: { user_id: 'id', ...store.type(t).columns }, key: ['user_id', 'id'], access: 'record', person: 'user_id' };
+    for (const [name, d] of Object.entries(types)) {
+        const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
+        columns[d.table ?? name] = {
+            kinds: { ...(person ? { [person]: 'id' } : {}), ...d.fields },
+            key: [...(person ? [person] : []), ...d.key],
+            access: d.access,
+            ...(person ? { person } : {}),
+            query: (d.query ?? []).filter((f) => !d.key.includes(f)),
+            ...(d.paths ? { paths: d.paths } : {}),
+        };
+    }
+    const layout = { types: store.types, tables, columns };
+    const schema = () => {
+        if (!backend.schema)
+            throw new EngineError('no_schema_support', backend.kind);
+        return backend.schema;
+    };
     return {
-        store,
+        store: opts.store,
+        plan: (settings) => schema().plan(settings, layout),
+        async migrate(settings, given) {
+            const now = await schema().plan(settings, layout);
+            if (now.conflicts.length)
+                throw new EngineError('schema_conflicts');
+            if (JSON.stringify(now.steps) !== JSON.stringify(given.steps))
+                throw new EngineError('plan_out_of_date');
+            if (now.steps.length)
+                await schema().apply(settings, now);
+        },
         connect(settings) {
-            const conn = backend.connect(settings, { schema: store.schema, types: store.types, tables });
+            const conn = backend.connect(settings, layout);
             return {
                 work: (scope, fn, o) => {
                     if (isSystem(scope)) {
@@ -75,15 +128,28 @@ const createdAtOk = (createdAt, now) => {
     const t = Date.parse(createdAt);
     return !(t < Date.parse('2000-01-01T00:00:00Z') || t > Date.parse(now) + 86_400_000);
 };
+/** The fields of a stored record, without the sync columns (inside the engine, from a mapped store). */
+const fieldsOf = (store, type, rec) => Object.fromEntries(store.fieldNames(type).map((n) => [n, rec[n] ?? null]));
 /** The fields of a stored record, without the sync columns. */
 export function fieldsFrom(store, type, rec) {
     const out = {};
-    for (const name of store.fieldNames(type))
+    for (const name of Object.keys(store.fields[type] ?? {}))
         out[name] = rec[name] ?? null;
     return out;
 }
-const RECORD_COLUMNS = { id: 'id', rev: 'number', created_at: 'time', updated_at: 'time', deleted_at: 'time' };
 const FIND_LIMIT = 100;
+/** An IANA time zone the runtime knows. */
+const validZone = (z) => {
+    if (typeof z !== 'string' || !/^[A-Za-z0-9_+\-/]{1,64}$/.test(z))
+        return false;
+    try {
+        new Intl.DateTimeFormat('en-US', { timeZone: z });
+        return true;
+    }
+    catch {
+        return false;
+    }
+};
 /** The engine's own tables in an app's schema: never an app's declared type. */
 const ENGINE_TABLES = ['counters', 'applied_ops', 'prefs', 'engine_audit'];
 const FIND_MAX = 1000;
@@ -104,6 +170,16 @@ function checkTypes(types) {
             throw new EngineError('version_not_number', `${name}.${d.version}`);
         if (d.access === 'person' && d.fields[d.personColumn ?? 'user_id'])
             throw new EngineError('person_column_declared', `${name}.${d.personColumn ?? 'user_id'}`);
+        for (const [p, x] of Object.entries(d.paths ?? {})) {
+            if (d.fields[p])
+                throw new EngineError('path_is_a_field', `${name}.${p}`);
+            if (d.fields[x.from] !== 'json')
+                throw new EngineError('path_not_in_json', `${name}.${p}`);
+            if (!x.path.length || x.path.some((k) => typeof k !== 'string' || !k || k.length > 100))
+                throw new EngineError('bad_path', `${name}.${p}`);
+            if (!['text', 'number', 'boolean'].includes(x.kind))
+                throw new EngineError('bad_path', `${name}.${p}`);
+        }
     }
 }
 /** The rules, on one unit. */
@@ -140,7 +216,7 @@ class Core {
     }
     shape(type) {
         if (this.store.isType(type)) {
-            const fields = { ...RECORD_COLUMNS, ...(this.store.queryColumns?.(type) ?? {}) };
+            const fields = this.store.type(type).queryable;
             const queryable = new Map(Object.entries(fields).map(([n, k]) => [n, { col: n, kind: k }]));
             return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable };
         }
@@ -150,6 +226,8 @@ class Core {
         const queryable = new Map();
         for (const n of [...d.key, ...(d.query ?? [])])
             queryable.set(n, { col: n, kind: d.fields[n] });
+        for (const [n, x] of Object.entries(d.paths ?? {}))
+            queryable.set(n, { col: n, kind: x.kind });
         return { name: type, table: d.table ?? type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
     }
     /** Whether this unit may read or write a type (ADR 0009); the person filter a query takes when it may. */
@@ -231,6 +309,86 @@ class Core {
         await this.audit(sh, 'count', n);
         return n;
     }
+    async summarize(u, type, o) {
+        const sh = this.shape(type);
+        const person = this.allow(sh, false);
+        const field = (name) => {
+            const f = sh.queryable.get(name);
+            if (!f)
+                throw new EngineError('not_queryable', name);
+            return f;
+        };
+        const alias = (a) => {
+            if (!/^[a-z][a-z0-9_]{0,62}$/i.test(a))
+                throw new EngineError('bad_name', a);
+            return a;
+        };
+        const kinds = new Map();
+        const by = (o.by ?? []).map((g) => {
+            if (typeof g === 'string') {
+                const f = field(g);
+                kinds.set(g, f.kind);
+                return { col: f.col, as: alias(g) };
+            }
+            const f = field(g.day);
+            if (f.kind !== 'time')
+                throw new EngineError('not_a_time', g.day);
+            if (!validZone(g.zone))
+                throw new EngineError('bad_zone', 'zone');
+            const as = alias(g.as ?? g.day);
+            kinds.set(as, 'day');
+            return { day: f.col, zone: g.zone, as };
+        });
+        if (by.length > 6)
+            throw new EngineError('too_many_groups');
+        const measures = Object.entries(o.measures ?? {}).map(([as, m]) => {
+            alias(as);
+            if (kinds.has(as))
+                throw new EngineError('name_taken', as);
+            const where = conditions(m.where, sh.queryable);
+            const fns = ['count', 'distinct', 'sum', 'avg', 'min', 'max', 'percentile'].filter((k) => k in m);
+            if (fns.length !== 1)
+                throw new EngineError('bad_measure', as);
+            const fn = fns[0];
+            if (fn === 'count') {
+                if (m.count !== true)
+                    throw new EngineError('bad_measure', as);
+                kinds.set(as, 'integer');
+                return { as, fn, where };
+            }
+            const f = field(m[fn]);
+            if (['sum', 'avg', 'percentile'].includes(fn) && f.kind !== 'number' && f.kind !== 'integer')
+                throw new EngineError('not_a_number', as);
+            const p = m.p;
+            if (fn === 'percentile' && !(typeof p === 'number' && p > 0 && p <= 1))
+                throw new EngineError('bad_measure', as);
+            kinds.set(as, fn === 'distinct' ? 'integer' : fn === 'min' || fn === 'max' ? f.kind : 'number');
+            return { as, fn, col: f.col, where, ...(fn === 'percentile' ? { p: p } : {}) };
+        });
+        if (!measures.length || measures.length > 20)
+            throw new EngineError('bad_measure');
+        let order;
+        if (o.order !== undefined) {
+            const desc = o.order.startsWith('-');
+            const as = desc ? o.order.slice(1) : o.order;
+            if (!kinds.has(as))
+                throw new EngineError('not_queryable', as);
+            order = { as, desc };
+        }
+        const limit = o.limit ?? FIND_LIMIT;
+        if (!Number.isInteger(limit) || limit < 1 || limit > FIND_MAX)
+            throw new EngineError('bad_limit');
+        const rows = await u.summarize({ table: sh.table, person, personColumn: sh.personColumn, where: conditions(o.where, sh.queryable), by, measures, ...(order ? { order } : {}), limit });
+        await this.audit(sh, 'summarize', rows.length);
+        return rows.map((r) => {
+            const o = {};
+            for (const [k, kind] of kinds) {
+                const v = r[k];
+                o[k] = kind === 'day' ? (v === null || v === undefined ? null : String(v).slice(0, 10)) : out(kind, v);
+            }
+            return o;
+        });
+    }
     /** A declared type, for a write: records are written only through apply. */
     writable(type) {
         const sh = this.shape(type);
@@ -275,7 +433,7 @@ class Core {
             throw new EngineError(e.kind === 'reference' ? 'reference' : 'refused', e.rule || undefined);
         throw e;
     }
-    async put(type, given) {
+    async put(type, given, opts = {}) {
         const { sh, person } = this.writable(type);
         const row = { ...given };
         let who = person;
@@ -295,9 +453,12 @@ class Core {
         if (sh.access === 'person')
             c[sh.personColumn] = who;
         try {
-            const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c));
-            await this.audit(sh, 'put', 1);
-            return this.outRow(sh, stored);
+            if (opts.onConflict !== undefined && !['update', 'nothing'].includes(opts.onConflict))
+                throw new EngineError('bad_on_conflict');
+            const key = [...(sh.access === 'person' ? [sh.personColumn] : []), ...sh.key];
+            const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c, opts.onConflict ? { key, action: opts.onConflict } : undefined));
+            await this.audit(sh, 'put', stored ? 1 : 0);
+            return stored ? this.outRow(sh, stored) : null;
         }
         catch (e) {
             this.refused(e);
@@ -365,6 +526,7 @@ class Core {
             },
             find: ((type, opts) => this.find(u, type, opts)),
             count: (type, opts) => this.count(u, type, opts),
+            summarize: (type, opts) => this.summarize(u, type, opts),
         };
     }
     work() {
@@ -375,10 +537,16 @@ class Core {
             getMany: r.getMany,
             find: r.find,
             count: r.count,
+            summarize: r.summarize,
             apply: (ops, now) => (p(), this.apply(ops, now ?? new Date().toISOString())),
             changes: (since, limit) => (p(), this.changes(since, limit)),
             prefs: { get: () => (p(), this.getPrefs()), put: (data, base) => (p(), this.putPrefs(data, base)) },
-            put: (type, row) => this.put(type, row),
+            put: (type, row, opts) => this.put(type, row, opts),
+            lock: async (name) => {
+                if (typeof name !== 'string' || !name || name.length > 200)
+                    throw new EngineError('bad_lock');
+                await this.u.lock(name);
+            },
             update: (type, key, changes, version) => this.update(type, key, changes, version),
             remove: (type, key) => this.remove(type, key),
         };
@@ -437,7 +605,7 @@ class Core {
         else {
             if (op.base_version === null || op.base_version !== current.version)
                 return { op_id: op.op_id, status: 'conflict', type: op.type, id: op.id, current };
-            fields = { ...fieldsFrom(store, op.type, current), ...changes };
+            fields = { ...fieldsOf(store, op.type, current), ...changes };
             deletedAt = op.delete === true ? (current.deleted_at ?? now) : op.delete === false ? null : current.deleted_at;
         }
         fields = store.normalize(op.type, fields, now);
@@ -665,7 +833,7 @@ class Core {
                                 continue;
                             }
                             const rec = store.toRecord(type, await crypto.openRow(type, row));
-                            const fields = store.normalize(type, fieldsFrom(store, type, rec), now);
+                            const fields = store.normalize(type, fieldsOf(store, type, rec), now);
                             const problems = store.validate(type, fields, p.op.id, { sealed: Number(row.enc) === 2 });
                             if (problems.length) {
                                 results[p.i] = invalid(p.op, problems);

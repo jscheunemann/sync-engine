@@ -1,3 +1,4 @@
+import type { Kind } from './declare.js';
 /** A stored row: the sync columns, the type's own columns, and `content` (an object). */
 export type Row = Record<string, unknown>;
 /** A unit for one signed-in person: their id, as the app's auth verified it. The engine does nothing else with tokens. */
@@ -14,14 +15,34 @@ export interface SystemScope {
 }
 export type Scope = PersonScope | SystemScope;
 export declare const isSystem: (s: Scope) => s is SystemScope;
-/** How an app's data is laid out: today's tables, adopted as they are (ADR 0006). */
+/**
+ * How an app's data is laid out, from its declarations (ADR 0014): each table, its columns by kind, and its key. Where
+ * the tables are (a Postgres schema, say) is the backend's setting, not the app's.
+ */
 export interface Layout {
-    /** Every table the app declared beyond the record types (server and shared types), so a backend refuses others. */
-    readonly tables?: readonly string[];
-    /** Where the record tables, the change counter, the op log and prefs live (a Postgres schema). */
-    readonly schema: string;
     /** The record types, one table each. */
     readonly types: readonly string[];
+    /** Every table the app declared beyond the record types (server and shared types), so a backend refuses others. */
+    readonly tables?: readonly string[];
+    /** Each table, from the declarations: its columns by kind, key, who its rows belong to, and its query fields. */
+    readonly columns?: Readonly<Record<string, TableLayout>>;
+}
+/** One table, as the backend needs it to write values by kind and to make or adopt the table (ADR 0014). */
+export interface TableLayout {
+    readonly kinds: Readonly<Record<string, Kind>>;
+    readonly key: readonly string[];
+    /** `record` (synced from devices), or a declared type's access. */
+    readonly access: 'record' | 'person' | 'shared' | 'system';
+    /** The column naming a row's person, for record and person tables. */
+    readonly person?: string;
+    /** Columns a find filters and orders by (indexed). */
+    readonly query?: readonly string[];
+    /** Values inside JSON columns, by name: a condition, group or measure on one reads it from its column. */
+    readonly paths?: Readonly<Record<string, {
+        readonly from: string;
+        readonly path: readonly string[];
+        readonly kind: 'text' | 'number' | 'boolean';
+    }>>;
 }
 /** A database rule refused a write (a check, a unique key, a reference). The core decides what that means for the op. */
 export declare class RuleError extends Error {
@@ -44,7 +65,7 @@ export type Cond = {
     value: unknown;
 } | {
     col: string;
-    op: 'in';
+    op: 'in' | 'nin';
     value: readonly unknown[];
 } | {
     col: string;
@@ -66,12 +87,39 @@ export interface Query {
     after?: readonly unknown[];
     limit?: number;
 }
+/** A summary (ADR 0016): conditions, groups and measures on checked columns (a column or a declared path's name). */
+export interface SummaryQuery {
+    table: string;
+    person: string | null;
+    personColumn: string;
+    where: readonly Cond[];
+    by: readonly ({
+        col: string;
+        as: string;
+    } | {
+        day: string;
+        zone: string;
+        as: string;
+    })[];
+    measures: readonly {
+        as: string;
+        fn: 'count' | 'distinct' | 'sum' | 'avg' | 'min' | 'max' | 'percentile';
+        col?: string;
+        p?: number;
+        where: readonly Cond[];
+    }[];
+    order?: {
+        as: string;
+        desc: boolean;
+    };
+    limit: number;
+}
 /** What a system unit did, for the audit log (ADR 0009). Counts and names only, never content. */
 export interface AuditEntry {
     intent: string;
     by: string | null;
     type: string;
-    action: 'get' | 'find' | 'count' | 'put' | 'update' | 'remove';
+    action: 'get' | 'find' | 'count' | 'summarize' | 'put' | 'update' | 'remove';
     rows: number;
 }
 /** One unit of work's view of the database: a transaction, kept to one person (or a declared system intent). */
@@ -117,8 +165,18 @@ export interface Unit {
     select(q: Query): Promise<Row[]>;
     /** How many rows match a query (its order, cursor and limit are ignored). */
     count(q: Query): Promise<number>;
-    /** Writes one row; returns it as stored. A refused write throws RuleError. */
-    insert(table: string, row: Row): Promise<Row>;
+    /**
+     * Writes one row; returns it as stored. A refused write throws RuleError. With `onConflict`, a row whose key is taken
+     * instead updates the given columns (`update`, returning the row) or is left as it is (`nothing`, returning null).
+     */
+    insert(table: string, row: Row, onConflict?: {
+        key: readonly string[];
+        action: 'update' | 'nothing';
+    }): Promise<Row | null>;
+    /** Groups and measures of the rows a summary keeps. */
+    summarize(q: SummaryQuery): Promise<Row[]>;
+    /** Holds a named lock until the unit ends: another unit asking for the same name waits. */
+    lock(name: string): Promise<void>;
     /** Changes the row matching `match` (all conditions); returns it as stored, or null when none matches. */
     update(table: string, match: readonly Cond[], cols: Row): Promise<Row | null>;
     /** Removes the rows matching `match`; returns how many. */
@@ -133,8 +191,29 @@ export interface Connection {
     /** Lets the connection go. */
     close(): Promise<void>;
 }
+/** What making or adopting an app's tables takes (ADR 0006): steps to read before they run, and what only a person can settle. */
+export interface SchemaPlan {
+    /** Additive steps, in order: each a line for the owner and the backend's statement. */
+    readonly steps: readonly {
+        readonly summary: string;
+        readonly sql: string;
+    }[];
+    /** Differences the engine leaves alone (a column of another type): a code each, never a value. */
+    readonly conflicts: readonly {
+        readonly table: string;
+        readonly column?: string;
+        readonly issue: string;
+        readonly want?: string;
+        readonly have?: string;
+    }[];
+}
 /** A database the engine can run on (ADR 0004). `S` is its connection settings. */
 export interface Backend<S> {
     readonly kind: string;
     connect(settings: S, layout: Layout): Connection;
+    /** The tables an app's layout needs, against what the database has; and applying such a plan. */
+    readonly schema?: {
+        plan(settings: S, layout: Layout): Promise<SchemaPlan>;
+        apply(settings: S, plan: SchemaPlan): Promise<void>;
+    };
 }
