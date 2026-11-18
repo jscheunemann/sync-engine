@@ -46,6 +46,30 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 **A new device pulls first**, and an app can adopt server records that are the same as ones the device made
 (`adopt`, e.g. `adoptByName('contexts', 'name')`) so defaults don't appear twice.
 
+## Version 2 (in progress): the engine owns data access
+
+Following `docs/adr/` 0002 to 0011, an app gives the engine connection settings and intents; the engine owns the
+driver, the SQL, transactions and per-person isolation. Nothing database-shaped crosses: no SQL, connection or driver
+types. Part 1 (this): the core and the Postgres backend, on today's tables.
+
+```ts
+import { createEngine } from '@jscheunemann/sync-engine/engine';
+import { postgres } from '@jscheunemann/sync-engine/postgres';
+
+const engine = createEngine({ store, backend: postgres });                       // once
+const session = engine.connect({ url: env.HYPERDRIVE.connectionString });        // per request
+const results = await session.work({ person }, (w) => w.apply(ops), { crypto }); // a unit of work
+const page = await session.work({ person }, (w) => w.changes(since, 500));
+ctx.waitUntil(session.close());
+```
+
+- `w.apply(ops)` applies ops with version 1's rules; all new records, or all plain deletes, go in bulk by themselves.
+- `w.changes`, `w.get`, `w.getMany`, `w.prefs.get` / `w.prefs.put`; everything in one `work` lands together.
+- An app's hooks get a reader, never a connection: `crossChecks(read, …)`, `ContentCrypto.prepare(read)`.
+- The Postgres driver is the engine's own dependency: apps don't install or upgrade it for the engine.
+- `test/contract.test.ts` runs every case of version 1's server test through this API, and isolation with row-level
+  security off.
+
 ## Using it
 
 ```ts

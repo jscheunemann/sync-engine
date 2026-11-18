@@ -13,7 +13,10 @@
     "./ids": { "types": "./dist/ids.d.ts", "default": "./dist/ids.js" },
     "./protocol": { "types": "./dist/protocol.d.ts", "default": "./dist/protocol.js" },
     "./device": { "types": "./dist/device.d.ts", "default": "./dist/device.js" },
-    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" }
+    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" },
+    "./engine": { "types": "./dist/engine.d.ts", "default": "./dist/engine.js" },
+    "./backend": { "types": "./dist/backend.d.ts", "default": "./dist/backend.js" },
+    "./postgres": { "types": "./dist/postgres.d.ts", "default": "./dist/postgres.js" }
   },
   "files": ["dist", "README.md"],
   "scripts": {
@@ -22,15 +25,11 @@
     "test": "node --test \"test/**/*.test.ts\"",
     "check": "npm run typecheck && npm test && npm run build && git diff --exit-code -- dist"
   },
-  "peerDependencies": {
-    "postgres": "^3.4.7"
-  },
-  "peerDependenciesMeta": {
-    "postgres": { "optional": true }
-  },
   "devDependencies": {
     "@types/node": "^22.18.0",
-    "postgres": "3.4.9",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "postgres": "3.4.9"
   }
 }
