@@ -1,0 +1,31 @@
+# Tags each release (CLAUDE.md: apps install from a tag): when main's package.json has a version with no tag yet,
+# tag that commit `v<version>`. A version that's already tagged is left alone, so this never moves a tag.
+name: tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag the version if it's new
+        run: |
+          v="v$(node -p "require('./package.json').version")"
+          if git rev-parse -q --verify "refs/tags/$v" >/dev/null; then
+            echo "$v is already tagged"
+          else
+            git config user.name github-actions
+            git config user.email github-actions@users.noreply.github.com
+            git tag -a "$v" -m "Release $v"
+            git push origin "$v"
+            echo "Tagged $v"
+          fi
