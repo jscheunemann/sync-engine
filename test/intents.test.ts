@@ -1,6 +1,7 @@
 // Intents for declared types (ADRs 0003, 0009, 0010): find and count on declared fields, put/update/remove, shared and
-// system types, and system intents with their audit. The same contract runs on the in-memory backend (always) and on
-// Postgres (with TEST_DATABASE_URL), with row-level security on, so a backend can't pass by its database alone.
+// system types, and system intents with their audit. The same contract runs on SQLite (always, tables from the
+// declarations) and on Postgres (with TEST_DATABASE_URL), with row-level security on, so a backend can't pass by its
+// database alone.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
@@ -9,7 +10,10 @@ import { EngineError, createEngine, type ContentCrypto, type RecordStore, type R
 import { cursor } from '../src/declare.ts';
 import { uuidv7 } from '../src/ids.ts';
 import { postgres } from '../src/postgres.ts';
-import { memoryBackend, type Memory } from './memory-backend.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { sqlite, sqliteRows } from './sqlite-backend.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'notes';
@@ -242,17 +246,21 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
   });
 }
 
-const keys = Object.fromEntries(Object.entries(types).map(([n, d]) => [n, d.access === 'person' ? ['user_id', ...d.key] : d.key]));
-
-contract('in memory', () => {
-  const mem: Memory = { tables: new Map(), audit: [], unique: new Map([['invitations', [['code']]]]) };
-  const engine = createEngine({ store: store(), backend: memoryBackend(mem, keys), types, system });
-  return {
-    session: engine.connect({}),
-    raw: async (t) => structuredClone(mem.tables.get(t) ?? []),
-    audit: async () => mem.audit.map((a) => ({ ...a, by_person: a.by })),
-  };
-});
+// SQLite: the tables made from the declarations (plan and migrate), then the same contract.
+{
+  const path = join(mkdtempSync(join(tmpdir(), 'se2-int-')), 'intents.db');
+  const engine = createEngine({ store: store(), backend: sqlite, types, system });
+  let session: Session<T> | undefined;
+  contract('SQLite, tables from the declarations', () => {
+    session ??= engine.connect({ path });
+    return {
+      session,
+      raw: async (t) => sqliteRows(path, `select * from "${t}"`) as Row[],
+      audit: async () => sqliteRows(path, `select intent, by_person, type, action, rows from engine_audit order by id`) as Row[],
+    };
+  });
+  before(async () => engine.migrate({ path }, await engine.plan({ path })));
+}
 
 describe('declarations are checked when the engine is made', () => {
   const mk = (t: Record<string, TypeDecl>, s: Record<string, SystemDecl> = {}) => () => createEngine({ store: store(), backend: postgres, types: t, system: s });

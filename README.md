@@ -51,8 +51,9 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 Following `docs/adr/` 0002 to 0011, an app gives the engine connection settings and intents; the engine owns the
 driver, the SQL, transactions and per-person isolation. Nothing database-shaped crosses: no SQL, connection or driver
 types. Part 1: the core and the Postgres backend, on today's tables. Part 2: declared types, find and count, and
-system intents with their audit (ADR 0012). Part 3: one backend for Postgres.js 3 and 4 (ADR 0013). Part 4 (this):
-records and tables from declarations (ADR 0014).
+system intents with their audit (ADR 0012). Part 3: one backend for Postgres.js 3 and 4 (ADR 0013). Part 4:
+records and tables from declarations (ADR 0014). Part 5 (this): SQLite, a test backend, passes the same contract
+(ADR 0015).
 
 ```ts
 import { createEngine } from '@jscheunemann/sync-engine/engine';
@@ -81,8 +82,9 @@ await engine.migrate(adminSettings, plan);        // refused if out of date or c
 - `w.changes`, `w.get`, `w.getMany`, `w.prefs.get` / `w.prefs.put`; everything in one `work` lands together.
 - An app's hooks get a reader, never a connection: `crossChecks(read, …)`, `ContentCrypto.prepare(read)`.
 - The Postgres driver is the engine's own dependency: apps don't install or upgrade it for the engine.
-- `test/contract.test.ts` runs every case of version 1's server test through this API, and isolation with row-level
-  security off.
+- `test/contract.test.ts` runs every case of version 1's server test through this API, isolation by the engine alone,
+  and every field kind, on Postgres and on SQLite (`test/sqlite-backend.ts`, tests only); `test/intents.test.ts` the
+  intents for declared types on both.
 
 Tables the app's server writes are declared, and reached by intents on declared fields only:
 
