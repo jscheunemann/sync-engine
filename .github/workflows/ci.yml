@@ -3,6 +3,7 @@
 name: CI
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
@@ -61,3 +62,31 @@ jobs:
         run: node --test test/contract.test.ts test/intents.test.ts test/records.test.ts test/schema.test.ts test/device.test.ts test/merge.test.ts
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+  # A pull request labelled `automerge` merges itself once both jobs pass, at the commit they tested (as keel does).
+  # Fixes and additions (patch and minor versions) get the label; a major version waits for the owner (CLAUDE.md).
+  merge:
+    needs: [test, driver]
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'automerge') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge the tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          now=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '.state + " " + .headRefOid')
+          case "$now" in
+            "OPEN $HEAD_SHA") gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$HEAD_SHA" ;;
+            "MERGED "*) echo "Already merged." ;;
+            "OPEN "*) echo "The pull request has a newer commit; its own run merges it." ;;
+            *) echo "Not merging: $now" ;;
+          esac

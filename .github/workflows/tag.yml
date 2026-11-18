@@ -2,9 +2,13 @@
 # tag that commit `v<version>`. A version that's already tagged is left alone, so this never moves a tag.
 name: tag
 
+# A merge made by CI's own token (automerge) doesn't start other workflows, so this also runs every 15 minutes.
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
