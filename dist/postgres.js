@@ -115,14 +115,27 @@ function filter(tx, q, cs) {
     }
     return and(tx, parts);
 }
-function unit(tx, layout, schema, person) {
+/** Where a type's table is: its schema (by the settings) and its table name (by the layout). */
+function placeOf(layout, settings, type) {
+    return { schema: settings.schemas?.[type] ?? settings.schema, table: layout.columns?.[type]?.table ?? type };
+}
+const NAME = /^[a-z_][a-z0-9_]{0,62}$/;
+const ENGINE_TABLES = ['counters', 'applied_ops', 'prefs', 'engine_audit'];
+function unit(tx, layout, settings, person) {
+    const schema = settings.schema;
     const kindsOf = (t) => layout.columns?.[t]?.kinds ?? {};
     const colsOf = (t) => ({ kinds: kindsOf(t), paths: layout.columns?.[t]?.paths ?? {} });
+    /** One of the engine's own tables, always in the app's schema. */
     const table = (name) => tx `${tx(schema)}.${tx(name)}`;
+    /** A type's table, wherever the settings put it. */
+    const typeTable = (type) => {
+        const p = placeOf(layout, settings, type);
+        return tx `${tx(p.schema)}.${tx(p.table)}`;
+    };
     const declared = (name) => {
         if (!layout.types.includes(name) && !(layout.tables ?? []).includes(name))
             throw new Error('unknown_table');
-        return table(name);
+        return typeTable(name);
     };
     /** A unit's person, for the operations that are only ever one person's. */
     const own = () => {
@@ -133,12 +146,12 @@ function unit(tx, layout, schema, person) {
     const known = (type) => {
         if (!layout.types.includes(type))
             throw new Error('unknown_type');
-        return table(type);
+        return typeTable(type);
     };
     const u = {
         savepoint: async (fn) => {
             try {
-                return await savepoint(tx, (sp) => fn(unit(sp, layout, schema, person)));
+                return await savepoint(tx, (sp) => fn(unit(sp, layout, settings, person)));
             }
             catch (e) {
                 throw rule(e);
@@ -337,12 +350,24 @@ function unit(tx, layout, schema, person) {
     };
     return u;
 }
-function checked(settings) {
+function checked(settings, layout) {
     if (!settings?.url)
         throw new Error('no_database');
     const schema = settings.schema;
-    if (typeof schema !== 'string' || !/^[a-z_][a-z0-9_]{0,62}$/.test(schema))
+    if (typeof schema !== 'string' || !NAME.test(schema))
         throw new Error('bad_schema');
+    for (const [type, s] of Object.entries(settings.schemas ?? {})) {
+        if (typeof s !== 'string' || !NAME.test(s))
+            throw new Error('bad_schema');
+        if (layout && !layout.columns?.[type])
+            throw new Error('unknown_type');
+    }
+    // No type's table may be one of the engine's own (same schema, same name).
+    for (const type of Object.keys(layout?.columns ?? {})) {
+        const p = placeOf(layout, settings, type);
+        if (p.schema === schema && ENGINE_TABLES.includes(p.table))
+            throw new Error('engine_table');
+    }
     return schema;
 }
 /** What the schema has now, for a plan. */
@@ -368,12 +393,17 @@ export const postgres = {
     kind: 'postgres',
     schema: {
         async plan(settings, layout) {
-            const schema = checked(settings);
+            const schema = checked(settings, layout);
             const sql = pg(settings.url, { max: 1, fetch_types: false, onnotice: () => { } });
             try {
                 const roles = [settings.role, settings.systemRole].filter((r) => !!r);
-                return plan(layout, await inspect(sql, schema, roles), {
+                const all = [schema, ...new Set(Object.values(settings.schemas ?? {}))];
+                const have = {};
+                for (const sc of all)
+                    have[sc] = await inspect(sql, sc, roles);
+                return plan(layout, have, {
                     schema,
+                    ...(settings.schemas ? { schemas: settings.schemas } : {}),
                     personSetting: settings.personSetting ?? 'app.user_id',
                     ...(settings.role ? { role: settings.role } : {}),
                     ...(settings.systemRole ? { systemRole: settings.systemRole } : {}),
@@ -399,7 +429,7 @@ export const postgres = {
         },
     },
     connect(settings, layout) {
-        const schema = checked(settings);
+        const schema = checked(settings, layout);
         const sql = pg(settings.url, {
             max: settings.max ?? 5,
             fetch_types: false, // no extra round trip on connect; the engine uses only built-in types
@@ -422,7 +452,7 @@ export const postgres = {
                     // otherwise rounded to 15 digits). A system unit sets no person: row-level security then shows no one's rows
                     // to anything but the system role.
                     await tx `select set_config(${personSetting}, ${sys ? '' : scope.person}, true), set_config('extra_float_digits', '3', true)`;
-                    return fn(unit(tx, layout, schema, sys ? null : scope.person));
+                    return fn(unit(tx, layout, settings, sys ? null : scope.person));
                 });
             },
             close: () => sql.end(),

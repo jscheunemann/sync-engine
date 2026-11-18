@@ -83,99 +83,115 @@ function columnDdl(t: TableLayout, col: string, kind: Kind, schema: string): str
   return `${PG_TYPE[kind]}${t.key.includes(col) ? ' not null' : ''}`;
 }
 
-/** The plan for one app's layout against what its schema has. */
-export function plan(layout: Layout, have: Catalog, o: PlanOptions): Plan {
-  const S = q(o.schema);
+/** An empty catalog: a schema that isn't there yet. */
+export const NONE: Catalog = { schema: false, columns: {}, functions: [], rls: {}, policies: {}, indexes: [], grants: {}, usage: [] };
+
+/**
+ * The plan for one app's layout against what its schemas have (`have`, by schema name). The engine's own tables and
+ * functions are in `o.schema`; each type's table is in `o.schemas[type]` if given (ADR 0017), and named by the layout.
+ */
+export function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o: PlanOptions & { schemas?: Readonly<Record<string, string>> }): Plan {
+  const main = o.schema;
+  const M = q(main);
   const steps: Step[] = [];
   const conflicts: Conflict[] = [];
   const step = (summary: string, sql: string) => steps.push({ summary, sql });
-  const tables = layout.columns ?? {};
+  const types = layout.columns ?? {};
   const roles = [o.role, o.systemRole].filter((r): r is string => !!r);
+  const cat = (schema: string) => have[schema] ?? NONE;
+  const placeOf = (type: string) => ({ schema: o.schemas?.[type] ?? main, table: types[type]?.table ?? type });
+  const at = (schema: string, table: string) => `${q(schema)}.${q(table)}`;
 
-  if (!have.schema) step(`Create schema ${o.schema}`, `create schema ${S};`);
-  const needUsage = roles.filter((r) => !have.usage.includes(r));
-  if (needUsage.length) step(`Let ${needUsage.join(' and ')} use schema ${o.schema}`, `grant usage on schema ${S} to ${needUsage.map(q).join(', ')};`);
-  /** Grants a role what it lacks on a table (or `fn:name`), and nothing it already has. */
-  const grant = (role: string | undefined, privs: string[], obj: string) => {
+  // Each schema the app uses: there, and usable by the roles.
+  const schemas = [main, ...new Set(Object.keys(types).map((t) => placeOf(t).schema).filter((x) => x !== main))];
+  for (const sc of schemas) {
+    if (!cat(sc).schema) step(`Create schema ${sc}`, `create schema ${q(sc)};`);
+    const needUsage = roles.filter((r) => !cat(sc).usage.includes(r));
+    if (needUsage.length) step(`Let ${needUsage.join(' and ')} use schema ${sc}`, `grant usage on schema ${q(sc)} to ${needUsage.map(q).join(', ')};`);
+  }
+  /** Grants a role what it lacks on a table (or `fn:name`) in a schema, and nothing it already has. */
+  const grant = (role: string | undefined, privs: string[], schema: string, obj: string) => {
     if (!role) return;
-    const missing = privs.filter((p) => !(have.grants[obj]?.[role] ?? []).includes(p));
+    const missing = privs.filter((p) => !(cat(schema).grants[obj]?.[role] ?? []).includes(p));
     if (!missing.length) return;
-    const target = obj.startsWith('fn:') ? `function ${S}.${q(obj.slice(3))}()` : `${S}.${q(obj)}`;
-    step(`Grant ${role} ${missing.join(', ')} on ${obj.replace(/^fn:/, '')}`, `grant ${missing.join(', ')} on ${target} to ${q(role)};`);
+    const target = obj.startsWith('fn:') ? `function ${q(schema)}.${q(obj.slice(3))}()` : at(schema, obj);
+    step(`Grant ${role} ${missing.join(', ')} on ${schema}.${obj.replace(/^fn:/, '')}`, `grant ${missing.join(', ')} on ${target} to ${q(role)};`);
+  };
+  const rlsOn = (schema: string, table: string) => {
+    const r = cat(schema).rls[table];
+    if (!r?.enabled) step(`Turn on row-level security for ${schema}.${table}`, `alter table ${at(schema, table)} enable row level security;`);
+    if (!r?.forced) step(`Force row-level security for ${schema}.${table}`, `alter table ${at(schema, table)} force row level security;`);
+  };
+  const policy = (schema: string, table: string, pname: string, body: string) => {
+    if (!(cat(schema).policies[table] ?? []).includes(pname)) step(`Policy ${pname} on ${schema}.${table}`, `create policy ${q(pname)} on ${at(schema, table)} ${body};`);
+  };
+  const personRls = (schema: string, table: string, col: string) => {
+    rlsOn(schema, table);
+    if (o.role) policy(schema, table, 'engine_person', `for all to ${q(o.role)} using (${q(col)} = ${M}.current_user_id()) with check (${q(col)} = ${M}.current_user_id())`);
   };
 
   // The engine's own: who the unit is for, change numbers, the op log, prefs, the audit.
-  if (!have.functions.includes('current_user_id'))
-    step('Create current_user_id()', `create function ${S}.current_user_id() returns uuid language sql stable as $$ select nullif(current_setting(${lit(o.personSetting)}, true), '')::uuid $$;`);
+  const mine = cat(main);
+  if (!mine.functions.includes('current_user_id'))
+    step('Create current_user_id()', `create function ${M}.current_user_id() returns uuid language sql stable as $$ select nullif(current_setting(${lit(o.personSetting)}, true), '')::uuid $$;`);
   const engine: Record<string, string> = {
-    counters: `create table ${S}.counters (user_id uuid primary key default ${S}.current_user_id(), rev bigint not null default 0, purged_rev bigint not null default 0);`,
-    applied_ops: `create table ${S}.applied_ops (user_id uuid not null default ${S}.current_user_id(), op_id uuid not null, result jsonb not null, created_at timestamptz not null default now(), primary key (user_id, op_id));`,
-    prefs: `create table ${S}.prefs (user_id uuid primary key default ${S}.current_user_id(), data jsonb not null default '{}', version integer not null default 1, updated_at timestamptz not null default now());`,
-    engine_audit: `create table ${S}.engine_audit (id bigint generated always as identity primary key, at timestamptz not null default now(), intent text not null, by_person uuid, type text not null, action text not null, rows integer not null);`,
+    counters: `create table ${M}.counters (user_id uuid primary key default ${M}.current_user_id(), rev bigint not null default 0, purged_rev bigint not null default 0);`,
+    applied_ops: `create table ${M}.applied_ops (user_id uuid not null default ${M}.current_user_id(), op_id uuid not null, result jsonb not null, created_at timestamptz not null default now(), primary key (user_id, op_id));`,
+    prefs: `create table ${M}.prefs (user_id uuid primary key default ${M}.current_user_id(), data jsonb not null default '{}', version integer not null default 1, updated_at timestamptz not null default now());`,
+    engine_audit: `create table ${M}.engine_audit (id bigint generated always as identity primary key, at timestamptz not null default now(), intent text not null, by_person uuid, type text not null, action text not null, rows integer not null);`,
   };
-  for (const [name, sql] of Object.entries(engine)) if (!have.columns[name]) step(`Create the engine's table ${name}`, sql);
-  if (!have.functions.includes('next_rev'))
+  for (const [name, sql] of Object.entries(engine)) if (!mine.columns[name]) step(`Create the engine's table ${name}`, sql);
+  if (!mine.functions.includes('next_rev'))
     step(
       'Create next_rev()',
-      `create function ${S}.next_rev() returns bigint language sql volatile as $$ insert into ${S}.counters as c (user_id, rev) values (${S}.current_user_id(), 1) on conflict (user_id) do update set rev = c.rev + 1 returning c.rev $$;`,
+      `create function ${M}.next_rev() returns bigint language sql volatile as $$ insert into ${M}.counters as c (user_id, rev) values (${M}.current_user_id(), 1) on conflict (user_id) do update set rev = c.rev + 1 returning c.rev $$;`,
     );
-  for (const name of ['counters', 'applied_ops', 'prefs']) personRls(name, 'user_id');
-  for (const name of ['counters', 'applied_ops', 'prefs']) grant(o.role, ['select', 'insert', 'update'], name);
-  grant(o.role, ['execute'], 'fn:current_user_id');
-  grant(o.role, ['execute'], 'fn:next_rev');
-  grant(o.systemRole, ['insert'], 'engine_audit');
-  grant(o.systemRole, ['execute'], 'fn:current_user_id');
+  for (const name of ['counters', 'applied_ops', 'prefs']) personRls(main, name, 'user_id');
+  for (const name of ['counters', 'applied_ops', 'prefs']) grant(o.role, ['select', 'insert', 'update'], main, name);
+  grant(o.role, ['execute'], main, 'fn:current_user_id');
+  grant(o.role, ['execute'], main, 'fn:next_rev');
+  grant(o.systemRole, ['insert'], main, 'engine_audit');
+  grant(o.systemRole, ['execute'], main, 'fn:current_user_id');
 
-  for (const [name, t] of Object.entries(tables)) {
-    const live = have.columns[name];
+  for (const [type, t] of Object.entries(types)) {
+    const { schema, table } = placeOf(type);
+    const where = at(schema, table);
+    const live = cat(schema).columns[table];
     if (!live) {
-      const cols = Object.entries(t.kinds).map(([c, k]) => `${q(c)} ${columnDdl(t, c, k, o.schema)}`);
-      step(`Create table ${name}`, `create table ${S}.${q(name)} (${cols.join(', ')}${t.key.length ? `, primary key (${t.key.map(q).join(', ')})` : ''});`);
+      const cols = Object.entries(t.kinds).map(([c, k]) => `${q(c)} ${columnDdl(t, c, k, main)}`);
+      step(`Create table ${schema}.${table}`, `create table ${where} (${cols.join(', ')}${t.key.length ? `, primary key (${t.key.map(q).join(', ')})` : ''});`);
     } else {
       for (const [c, k] of Object.entries(t.kinds)) {
         const typ = live[c];
         if (typ === undefined) {
           // A new column on a table with rows: nullable unless the engine has a default for it.
-          const ddl = columnDdl(t, c, k, o.schema).replace(/ not null$/, '');
-          step(`Add column ${name}.${c}`, `alter table ${S}.${q(name)} add column ${q(c)} ${ddl};`);
-        } else if (!FITS[k].includes(typ)) conflicts.push({ table: name, column: c, issue: typ === 'timestamp' && k === 'time' ? 'no_zone' : 'type', want: PG_TYPE[k], have: typ });
+          const ddl = columnDdl(t, c, k, main).replace(/ not null$/, '');
+          step(`Add column ${schema}.${table}.${c}`, `alter table ${where} add column ${q(c)} ${ddl};`);
+        } else if (!FITS[k].includes(typ)) conflicts.push({ table: `${schema}.${table}`, column: c, issue: typ === 'timestamp' && k === 'time' ? 'no_zone' : 'type', want: PG_TYPE[k], have: typ });
       }
     }
     // Indexes: the change feed's (person, rev) for records; each query field, after the person where there is one.
     const idx = (cols: string[]) => {
-      const iname = `${name}_${cols.join('_')}_idx`.slice(0, 63);
-      if (!have.indexes.includes(iname)) step(`Index ${name} (${cols.join(', ')})`, `create index if not exists ${q(iname)} on ${S}.${q(name)} (${cols.map(q).join(', ')});`);
+      const iname = `${table}_${cols.join('_')}_idx`.slice(0, 63);
+      if (!cat(schema).indexes.includes(iname)) step(`Index ${schema}.${table} (${cols.join(', ')})`, `create index if not exists ${q(iname)} on ${where} (${cols.map(q).join(', ')});`);
     };
     if (t.access === 'record') idx(['user_id', 'rev']);
     for (const f of t.query ?? []) idx([...(t.person ? [t.person] : []), f]);
 
-    if (t.person) personRls(name, t.person);
-    else rlsOn(name);
+    if (t.person) personRls(schema, table, t.person);
+    else rlsOn(schema, table);
     const all = ['select', 'insert', 'update', 'delete'];
-    if (t.access === 'record') grant(o.role, ['select', 'insert', 'update'], name);
-    else if (t.access === 'person') grant(o.role, all, name);
+    if (t.access === 'record') grant(o.role, ['select', 'insert', 'update'], schema, table);
+    else if (t.access === 'person') grant(o.role, all, schema, table);
     else if (t.access === 'shared') {
-      grant(o.role, ['select'], name);
-      if (o.role) policy(name, 'engine_read', `for select to ${q(o.role)} using (true)`);
+      grant(o.role, ['select'], schema, table);
+      if (o.role) policy(schema, table, 'engine_read', `for select to ${q(o.role)} using (true)`);
     }
     // A system intent may read records (find, count) and read and write its declared types.
-    grant(o.systemRole, t.access === 'record' ? ['select'] : all, name);
-    if (o.systemRole) policy(name, 'engine_system', `for all to ${q(o.systemRole)} using (true) with check (true)`);
+    grant(o.systemRole, t.access === 'record' ? ['select'] : all, schema, table);
+    if (o.systemRole) policy(schema, table, 'engine_system', `for all to ${q(o.systemRole)} using (true) with check (true)`);
   }
   return { steps, conflicts };
-
-  function rlsOn(name: string) {
-    const r = have.rls[name];
-    if (!r?.enabled) step(`Turn on row-level security for ${name}`, `alter table ${S}.${q(name)} enable row level security;`);
-    if (!r?.forced) step(`Force row-level security for ${name}`, `alter table ${S}.${q(name)} force row level security;`);
-  }
-  function policy(name: string, pname: string, body: string) {
-    if (!(have.policies[name] ?? []).includes(pname)) step(`Policy ${pname} on ${name}`, `create policy ${q(pname)} on ${S}.${q(name)} ${body};`);
-  }
-  function personRls(name: string, col: string) {
-    rlsOn(name);
-    if (o.role) policy(name, 'engine_person', `for all to ${q(o.role)} using (${q(col)} = ${S}.current_user_id()) with check (${q(col)} = ${S}.current_user_id())`);
-  }
 }
 
 /** The catalog query, for a backend that runs it (Postgres's: `inspect` in postgres.ts). */

@@ -119,7 +119,7 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
   const kindOf = (t: string, name: string): Kind | undefined => pathsOf(t)[name]?.kind ?? kindsOf(t)[name];
   const declared = (t: string) => {
     if (!layout.types.includes(t) && !(layout.tables ?? []).includes(t)) throw new Error('unknown_table');
-    return q(t);
+    return q(layout.columns?.[t]?.table ?? t);
   };
   const own = (): string => {
     if (person === null) throw new Error('person_scope_only');
@@ -380,7 +380,8 @@ export const sqlite: Backend<SqliteSettings> = {
       const have = new Set((s.prepare(`select name from sqlite_master where type = 'table'`).all() as { name: string }[]).map((r) => r.name));
       const steps: { summary: string; sql: string }[] = [];
       for (const [name, e] of Object.entries(ENGINE)) if (!have.has(name)) steps.push({ summary: `Create the engine's table ${name}`, sql: `${e.ddl};` });
-      for (const [name, t] of Object.entries(layout.columns ?? {})) {
+      for (const [type, t] of Object.entries(layout.columns ?? {})) {
+        const name = t.table;
         if (have.has(name)) {
           const cols = new Set((s.prepare(`select name from pragma_table_info(?)`).all(name) as { name: string }[]).map((r) => r.name));
           for (const [c, k] of Object.entries(t.kinds))

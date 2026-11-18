@@ -22,13 +22,18 @@ export declare const isSystem: (s: Scope) => s is SystemScope;
 export interface Layout {
     /** The record types, one table each. */
     readonly types: readonly string[];
-    /** Every table the app declared beyond the record types (server and shared types), so a backend refuses others. */
+    /** Every type the app declared beyond the record types (server and shared types), so a backend refuses others. */
     readonly tables?: readonly string[];
-    /** Each table, from the declarations: its columns by kind, key, who its rows belong to, and its query fields. */
+    /**
+     * Each type, by name, from the declarations: its table, columns by kind, key, who its rows belong to, and its query
+     * fields. Units name types; the backend finds each type's table (and, by its settings, where the table is).
+     */
     readonly columns?: Readonly<Record<string, TableLayout>>;
 }
 /** One table, as the backend needs it to write values by kind and to make or adopt the table (ADR 0014). */
 export interface TableLayout {
+    /** The table's name (a type's own name unless it declared another). */
+    readonly table: string;
     readonly kinds: Readonly<Record<string, Kind>>;
     readonly key: readonly string[];
     /** `record` (synced from devices), or a declared type's access. */

@@ -7,7 +7,7 @@ import pg from 'postgres';
 import { EngineError, createEngine, type RecordStore, type SchemaPlan, type SystemDecl, type TypeDecl } from '../src/engine.ts';
 import { uuidv7 } from '../src/ids.ts';
 import { postgres } from '../src/postgres.ts';
-import { type Catalog, plan } from '../src/postgres-schema.ts';
+import { type Catalog, NONE, plan } from '../src/postgres-schema.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'tasks';
@@ -30,7 +30,8 @@ function layoutOf() {
   createEngine({ store, backend: spy, types, system }).connect({});
   return seen as Parameters<typeof plan>[0];
 }
-const none: Catalog = { schema: false, columns: {}, functions: [], rls: {}, policies: {}, indexes: [], grants: {}, usage: [] };
+const none: Record<string, Catalog> = {};
+const one = (c: Catalog) => ({ app: c });
 const opts = { schema: 'app', role: 'app_api', systemRole: 'app_sys', personSetting: 'app.user_id' };
 
 describe('the plan', () => {
@@ -54,7 +55,7 @@ describe('the plan', () => {
 
   test('adopting tables that are there: missing columns added (nullable), types that differ reported and left alone', () => {
     const have: Catalog = {
-      ...none,
+      ...NONE,
       schema: true,
       functions: ['current_user_id', 'next_rev'],
       columns: {
@@ -63,15 +64,30 @@ describe('the plan', () => {
         keys: { user_id: 'uuid', version: 'int4', wrapped: 'jsonb' },
       },
     };
-    const p = plan(layoutOf(), have, opts);
+    const p = plan(layoutOf(), one(have), opts);
     assert.deepEqual(p.conflicts, [
-      { table: 'tasks', column: 'updated_at', issue: 'no_zone', want: 'timestamptz', have: 'timestamp' },
-      { table: 'keys', column: 'wrapped', issue: 'type', want: 'text', have: 'jsonb' },
+      { table: 'app.tasks', column: 'updated_at', issue: 'no_zone', want: 'timestamptz', have: 'timestamp' },
+      { table: 'app.keys', column: 'wrapped', issue: 'type', want: 'text', have: 'jsonb' },
     ]);
     const sql = p.steps.map((s) => s.sql).join('\n');
     assert.match(sql, /alter table "app"\."tasks" add column "due" jsonb;/);
     assert.doesNotMatch(sql, /create table "app"\."(tasks|keys|counters)"/);
     assert.doesNotMatch(sql, /create schema|create function/);
+  });
+
+  test('a type in another schema, under a table name of its own, even one the engine uses in the app’s schema (ADR 0017)', () => {
+    let seen: unknown;
+    const spy = { kind: 'spy', connect: (_s: unknown, l: unknown) => ((seen = l), { unit: async () => undefined as never, close: async () => {} }) };
+    createEngine({ store, backend: spy, types: { ...types, account_prefs: { access: 'person', table: 'prefs', key: [], fields: { prefs: 'json' } } }, system }).connect({});
+    const p = plan(seen as Parameters<typeof plan>[0], {}, { ...opts, schemas: { account_prefs: 'other', invitations: 'other' } });
+    const sql = p.steps.map((x) => x.sql).join('\n');
+    assert.match(sql, /create schema "other";/);
+    assert.match(sql, /grant usage on schema "other" to "app_api", "app_sys";/);
+    assert.match(sql, /create table "other"\."prefs" \("user_id" uuid not null default "app"\.current_user_id\(\), "prefs" jsonb, primary key \("user_id"\)\);/);
+    assert.match(sql, /create table "app"\.prefs /, 'the engine’s own prefs, in the app’s schema');
+    assert.match(sql, /create table "other"\."invitations"/);
+    assert.match(sql, /create policy "engine_person" on "other"\."prefs" for all to "app_api" using \("user_id" = "app"\.current_user_id\(\)\)/);
+    assert.doesNotMatch(sql, /create table "app"\."invitations"/);
   });
 
   test('nothing to do when everything is there', () => {
@@ -90,7 +106,7 @@ describe('the plan', () => {
       const g = s.sql.match(/^grant ([a-z, ]+) on (function )?"app"\."([a-z_]+)"(?:\(\))? to "([a-z_]+)"/);
       if (g) ((have.grants[(g[2] ? 'fn:' : '') + g[3]!] ??= {})[g[4]!] ??= []).push(...g[1]!.split(', '));
     }
-    const p2 = plan(layoutOf(), have, opts);
+    const p2 = plan(layoutOf(), one(have), opts);
     assert.deepEqual(p2.steps.filter((s) => !s.sql.startsWith('alter table') || !/add column/.test(s.sql)).map((s) => s.summary), []);
   });
 });
@@ -103,12 +119,12 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
 
   before(async () => {
     admin = pg(URL_!, { max: 2, onnotice: () => {} });
-    await admin.unsafe(`drop schema if exists ${S} cascade`);
+    await admin.unsafe(`drop schema if exists ${S}_other cascade; drop schema if exists ${S} cascade`);
     for (const r of ['se2_made_api', 'se2_made_sys'])
       await admin.unsafe(`do $$ begin if exists (select from pg_roles where rolname = '${r}') then execute 'drop owned by ${r}'; drop role ${r}; end if; end $$; create role ${r} nologin;`);
   });
   after(async () => {
-    await admin.unsafe(`drop schema if exists ${S} cascade; drop owned by se2_made_api; drop owned by se2_made_sys; drop role if exists se2_made_api; drop role if exists se2_made_sys`);
+    await admin.unsafe(`drop schema if exists ${S}_other cascade; drop schema if exists ${S} cascade; drop owned by se2_made_api; drop owned by se2_made_sys; drop role if exists se2_made_api; drop role if exists se2_made_sys`);
     await admin.end();
   });
 
@@ -123,7 +139,7 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
     assert.deepEqual(again.steps.map((s) => s.summary), [], 'applied: nothing left to do');
     await admin.unsafe(`alter table ${S}.keys alter column wrapped type jsonb using to_jsonb(wrapped)`);
     const conflicted = await engine.plan(settings);
-    assert.deepEqual(conflicted.conflicts.map((c) => [c.table, c.column, c.issue]), [['keys', 'wrapped', 'type']]);
+    assert.deepEqual(conflicted.conflicts.map((c) => [c.table, c.column, c.issue]), [[`${S}.keys`, 'wrapped', 'type']]);
     await assert.rejects(engine.migrate(settings, conflicted), (e: unknown) => e instanceof EngineError && e.code === 'schema_conflicts');
     await admin.unsafe(`alter table ${S}.keys alter column wrapped type text using wrapped #>> '{}'`);
   });
@@ -159,5 +175,29 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
     } finally {
       await session.close();
     }
+  });
+
+  test('a type kept in another schema, its table named like the engine’s own prefs, both used in one unit (ADR 0017)', async () => {
+    const more = createEngine({ store, backend: postgres, types: { ...types, account_prefs: { access: 'person', table: 'prefs', key: [], fields: { prefs: 'json' } } }, system });
+    const at = { ...settings, schemas: { account_prefs: `${S}_other` } };
+    await more.migrate(at, await more.plan(at));
+    assert.deepEqual((await more.plan(at)).steps.map((x) => x.summary), []);
+    const session = more.connect(at);
+    try {
+      const P = uuidv7();
+      await session.work({ person: P }, async (w) => {
+        await w.put('account_prefs', { prefs: { analytics: false } });
+        await w.prefs.put({ theme: 'dark' }, 0);
+      });
+      const [mine, engines] = await session.work({ person: P }, async (w) => [(await w.find('account_prefs')).rows, await w.prefs.get()]);
+      assert.deepEqual(mine, [{ prefs: { analytics: false } }]);
+      assert.deepEqual((engines as { data: unknown }).data, { theme: 'dark' });
+      const [where] = await admin.unsafe(`select (select count(*)::int from ${S}_other.prefs) as other, (select count(*)::int from ${S}.prefs where user_id = $1) as engine`, [P]);
+      assert.deepEqual([where!.other, where!.engine], [1, 1]);
+    } finally {
+      await session.close();
+    }
+    assert.throws(() => more.connect({ ...settings, schemas: { account_prefs: S } }), /engine_table/, 'not in the engine’s own schema under its table’s name');
+    assert.throws(() => more.connect({ ...settings, schemas: { nobody: S } }), /unknown_type/);
   });
 });

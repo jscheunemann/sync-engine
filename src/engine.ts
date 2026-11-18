@@ -208,13 +208,14 @@ export function createEngine<T extends string, S>(opts: {
   for (const [name, d] of Object.entries(system))
     for (const t of [...(d.read ?? []), ...(d.write ?? [])]) if (!types[t] && !store.isType(t)) throw new EngineError('unknown_type', `${name}.${t}`);
   checkTypes(types);
-  const tables = Object.entries(types).map(([name, d]) => d.table ?? name);
+  const tables = Object.keys(types);
   // Every table's columns by kind, for the backend to write each value as its kind and, in part 4b, to make the tables.
   const columns: Record<string, TableLayout> = {};
-  for (const t of store.types) columns[t] = { kinds: { user_id: 'id', ...store.type(t).columns }, key: ['user_id', 'id'], access: 'record', person: 'user_id' };
+  for (const t of store.types) columns[t] = { table: t, kinds: { user_id: 'id', ...store.type(t).columns }, key: ['user_id', 'id'], access: 'record', person: 'user_id' };
   for (const [name, d] of Object.entries(types)) {
     const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
-    columns[d.table ?? name] = {
+    columns[name] = {
+      table: d.table ?? name,
       kinds: { ...(person ? { [person]: 'id' as Kind } : {}), ...d.fields },
       key: [...(person ? [person] : []), ...d.key],
       access: d.access,
@@ -310,7 +311,9 @@ const FIND_MAX = 1000;
 function checkTypes(types: Readonly<Record<string, TypeDecl>>): void {
   for (const [name, d] of Object.entries(types)) {
     if (!['person', 'shared', 'system'].includes(d.access)) throw new EngineError('bad_access', name);
-    if (ENGINE_TABLES.includes(d.table ?? name)) throw new EngineError('engine_table', name);
+    // A type can't be called after the engine's own tables. Its table may share a name with one if the backend keeps it
+    // elsewhere (another schema): the backend checks that, since only it knows where tables are.
+    if (ENGINE_TABLES.includes(name)) throw new EngineError('engine_table', name);
     for (const k of [...d.key, ...(d.query ?? []), ...(d.sealed ?? []), ...(d.version ? [d.version] : [])])
       if (!d.fields[k]) throw new EngineError('undeclared_field', `${name}.${k}`);
     for (const k of d.sealed ?? []) if (d.fields[k] !== 'json') throw new EngineError('sealed_not_json', `${name}.${k}`);
@@ -368,7 +371,7 @@ class Core<T extends string> {
     const queryable = new Map<string, { col: string; kind: Kind }>();
     for (const n of [...d.key, ...(d.query ?? [])]) queryable.set(n, { col: n, kind: d.fields[n]! });
     for (const [n, x] of Object.entries(d.paths ?? {})) queryable.set(n, { col: n, kind: x.kind });
-    return { name: type, table: d.table ?? type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
+    return { name: type, table: type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
   }
 
   /** Whether this unit may read or write a type (ADR 0009); the person filter a query takes when it may. */

@@ -30,8 +30,15 @@ export interface PlanOptions {
 }
 /** The column type each kind gets in a new table or column. */
 export declare const PG_TYPE: Readonly<Record<Kind, string>>;
-/** The plan for one app's layout against what its schema has. */
-export declare function plan(layout: Layout, have: Catalog, o: PlanOptions): Plan;
+/** An empty catalog: a schema that isn't there yet. */
+export declare const NONE: Catalog;
+/**
+ * The plan for one app's layout against what its schemas have (`have`, by schema name). The engine's own tables and
+ * functions are in `o.schema`; each type's table is in `o.schemas[type]` if given (ADR 0017), and named by the layout.
+ */
+export declare function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o: PlanOptions & {
+    schemas?: Readonly<Record<string, string>>;
+}): Plan;
 /** The catalog query, for a backend that runs it (Postgres's: `inspect` in postgres.ts). */
 export declare const CATALOG_SQL: {
     schema: string;
