@@ -10,6 +10,10 @@ import { createEngine, CursorExpired, type ContentCrypto, type RecordStore, type
 import { uuidv7 } from '../src/ids.ts';
 import { postgres, type PostgresSettings } from '../src/postgres.ts';
 import { checkOp, type Fields, type Op, type Transport } from '../src/protocol.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { sqlite, sqliteExec, sqliteRow, sqliteRows } from './sqlite-backend.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'notes';
@@ -87,26 +91,30 @@ const create = (title: string, o: Partial<Op> = {}): Op => ({ op_id: uuidv7(), t
 const del = (r: StoredRecord, o: Partial<Op> = {}): Op => ({ op_id: uuidv7(), type: 'notes', id: r.id, base_version: r.version, delete: true, ...o });
 const rec = (r: unknown) => (r as { record: StoredRecord }).record;
 
-describe('contract: Postgres, through the engine, row-level security on', { skip: !URL_ && 'TEST_DATABASE_URL not set' }, () => {
-  const S = 'se2_test';
-  let admin: ReturnType<typeof pg>;
+/** One backend's database, for the contract: a session, and the two things an operator does outside the engine. */
+interface Rig {
+  session: Session<T>;
+  /** A clean-up happened: changes up to `rev` are gone for this person. */
+  setPurged(person: string, rev: number): Promise<void>;
+  /** A record's deleted_at as stored (a tombstone is kept, not removed). */
+  deletedAt(id: string): Promise<unknown>;
+  close(): Promise<void>;
+}
+
+/** Every case version 1's server test covers, through intents, on one backend (ADR 0005). */
+function recordContract(name: string, make: () => Promise<Rig>, skip: string | false) {
+describe(`contract: ${name}`, { skip }, () => {
+  let rig: Rig;
   let session: Session<T>;
   let h: ReturnType<typeof harness>;
   const A = uuidv7(), B = uuidv7();
 
   before(async () => {
-    admin = pg(URL_!, { max: 2, onnotice: () => {} });
-    await admin.unsafe(`do $$ begin if exists (select from pg_roles where rolname = 'se2_api') then execute 'drop owned by se2_api'; drop role se2_api; end if; end $$;`).catch(() => {});
-    await admin.unsafe(`create role se2_api nologin;` + ddl(S, true));
-    const engine = createEngine({ store: storeIn(), backend: postgres });
-    session = engine.connect({ url: URL_!, schema: S, max: 2, role: 'se2_api' } satisfies PostgresSettings);
+    rig = await make();
+    session = rig.session;
     h = harness(session);
   });
-  after(async () => {
-    await session.close();
-    await admin.unsafe(`drop schema if exists ${S} cascade; drop owned by se2_api; drop role if exists se2_api`);
-    await admin.end();
-  });
+  after(() => rig.close());
 
   test('new records in one call go in bulk, each just as one op would, in order, with revs in a row', async () => {
     const ops = Array.from({ length: 1203 }, (_, i) => create(` Note ${i} `));
@@ -247,7 +255,7 @@ describe('contract: Postgres, through the engine, row-level security on', { skip
     assert.equal(p1.next, p1.changes[1]!.record.rev);
     const p2 = await h.changes(P, p1.next!, 2);
     assert.deepEqual([p2.changes.map((c) => c.record.id), p2.next], [ids.slice(2), null]);
-    await admin`update ${admin(S)}.counters set purged_rev = 2 where user_id = ${P}`;
+    await rig.setPurged(P, 2);
     await assert.rejects(h.changes(P, 1, 10), CursorExpired);
     assert.equal((await h.changes(P, 0, 10)).changes.length, 3, '0 is always allowed');
   });
@@ -300,29 +308,25 @@ describe('contract: Postgres, through the engine, row-level security on', { skip
       assert.deepEqual(d.recs.get(key('notes', id))!.fields, { title: 'Plan A', body: 'v1', pinned: true });
       assert.equal(d.recs.has(key('notes', gone)), false);
     }
-    const [row] = await admin`select deleted_at from ${admin(S)}.notes where id = ${gone}`;
-    assert.ok(row!.deleted_at, 'kept as a tombstone');
+    assert.ok(await rig.deletedAt(gone), 'kept as a tombstone');
   });
 });
+}
 
-describe('contract: isolation by the engine alone (row-level security off)', { skip: !URL_ && 'TEST_DATABASE_URL not set' }, () => {
-  const S = 'se2_open';
-  let admin: ReturnType<typeof pg>;
+/** Isolation by the engine alone (ADR 0007): no row-level security under it. */
+function isolationContract(name: string, make: () => Promise<Rig>, skip: string | false) {
+describe(`contract: isolation by the engine alone, ${name}`, { skip }, () => {
+  let rig: Rig;
   let session: Session<T>;
   let h: ReturnType<typeof harness>;
   const A = uuidv7(), B = uuidv7();
 
   before(async () => {
-    admin = pg(URL_!, { max: 2, onnotice: () => {} });
-    await admin.unsafe(ddl(S, false));
-    session = createEngine({ store: storeIn(), backend: postgres }).connect({ url: URL_!, schema: S, max: 2 });
+    rig = await make();
+    session = rig.session;
     h = harness(session);
   });
-  after(async () => {
-    await session.close();
-    await admin.unsafe(`drop schema if exists ${S} cascade`);
-    await admin.end();
-  });
+  after(() => rig.close());
 
   test('no intent reads, changes or deletes another person’s data', async () => {
     const [made] = await h.push(A, [create('mine')]);
@@ -352,35 +356,85 @@ describe('contract: isolation by the engine alone (row-level security off)', { s
     assert.throws(() => session.work({ person: '' }, async () => 1), /scope_required/);
   });
 });
+}
 
-describe('contract: every field kind, stored by the engine from declarations (ADR 0014)', { skip: !URL_ && 'TEST_DATABASE_URL not set' }, () => {
-  const S = 'se2_kinds';
-  type K = 'tasks';
-  let admin: ReturnType<typeof pg>;
+/** Postgres, with today's tables made by hand (adopted, ADR 0006); `rls` adds row-level security and the API role. */
+function pgRig(S: string, rls: boolean) {
+  return async (): Promise<Rig> => {
+    const admin = pg(URL_!, { max: 2, onnotice: () => {} });
+    if (rls) {
+      await admin.unsafe(`do $$ begin if exists (select from pg_roles where rolname = 'se2_api') then execute 'drop owned by se2_api'; drop role se2_api; end if; end $$;`).catch(() => {});
+      await admin.unsafe(`create role se2_api nologin;`);
+    }
+    await admin.unsafe(ddl(S, rls));
+    const session = createEngine({ store: storeIn(), backend: postgres }).connect({ url: URL_!, schema: S, max: 2, ...(rls ? { role: 'se2_api' } : {}) } satisfies PostgresSettings);
+    return {
+      session,
+      setPurged: async (person, rev) => void (await admin.unsafe(`update ${S}.counters set purged_rev = $1 where user_id = $2`, [rev, person])),
+      deletedAt: async (id) => (await admin.unsafe(`select deleted_at from ${S}.notes where id = $1`, [id]))[0]?.deleted_at,
+      close: async () => {
+        await session.close();
+        await admin.unsafe(`drop schema if exists ${S} cascade` + (rls ? `; drop owned by se2_api; drop role if exists se2_api` : ''));
+        await admin.end();
+      },
+    };
+  };
+}
+
+/**
+ * SQLite (test/sqlite-backend.ts), with the tables the engine plans from the declarations, plus the database rule the
+ * contract checks (a title of at most 40 characters), added as an operator would.
+ */
+function sqliteRig() {
+  return async (): Promise<Rig> => {
+    const dir = mkdtempSync(join(tmpdir(), 'se2-'));
+    const path = join(dir, 'contract.db');
+    const engine = createEngine({ store: storeIn(), backend: sqlite });
+    const p = await engine.plan({ path });
+    await sqlite.schema!.apply({ path }, { ...p, steps: p.steps.map((st) => ({ ...st, sql: st.sql.replace('"title" text', '"title" text constraint notes_title_check check (length(title) <= 40)') })) });
+    const session = engine.connect({ path });
+    return {
+      session,
+      setPurged: async (person, rev) => sqliteExec(path, `update counters set purged_rev = ? where user_id = ?`, rev, person),
+      deletedAt: async (id) => sqliteRow(path, `select deleted_at from notes where id = ?`, id)?.deleted_at,
+      close: async () => {
+        await session.close();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  };
+}
+
+const noDb = !URL_ && 'TEST_DATABASE_URL not set';
+recordContract('Postgres, through the engine, row-level security on', pgRig('se2_test', true), noDb);
+recordContract('SQLite, through the engine', sqliteRig(), false);
+isolationContract('Postgres (row-level security off)', pgRig('se2_open', false), noDb);
+isolationContract('SQLite (no row-level security at all)', sqliteRig(), false);
+
+type K = 'tasks';
+const kindsStore: RecordStore<K> = {
+  types: ['tasks'],
+  fields: { tasks: { title: 'text', size: 'integer', est: 'number', done: 'boolean', due_at: 'time', tags: 'ids', due: 'json', notes: { kind: 'text', content: true } } },
+  validate: () => [],
+};
+
+/** A backend's session for every field kind, and a record's stored list, JSON and content, as plain values. */
+interface KindsRig {
+  session: Session<K>;
+  stored(id: string): Promise<{ tags: unknown; due: unknown; content: unknown }>;
+  close(): Promise<void>;
+}
+
+function kindsContract(name: string, make: () => Promise<KindsRig>, skip: string | false) {
+describe(`contract: every field kind, stored by the engine from declarations (ADR 0014), ${name}`, { skip }, () => {
+  let rig: KindsRig;
   let session: Session<K>;
   const P = uuidv7();
-  const store: RecordStore<K> = {
-    types: ['tasks'],
-    fields: { tasks: { title: 'text', size: 'integer', est: 'number', done: 'boolean', due_at: 'time', tags: 'ids', due: 'json', notes: { kind: 'text', content: true } } },
-    validate: () => [],
-  };
-
   before(async () => {
-    admin = pg(URL_!, { max: 2, onnotice: () => {} });
-    await admin.unsafe(ddl(S, false) + `
-create table ${S}.tasks (
-  user_id uuid not null, id uuid not null, rev bigint not null, version integer not null default 1,
-  created_at timestamptz not null default now(), updated_at timestamptz not null default now(), client_updated_at timestamptz, deleted_at timestamptz,
-  content jsonb not null default '{}', enc smallint not null default 0, key_version integer not null default 0,
-  title text, size integer, est double precision, done boolean, due_at timestamptz, tags uuid[] not null default '{}', due jsonb,
-  primary key (user_id, id));`);
-    session = createEngine({ store, backend: postgres }).connect({ url: URL_!, schema: S, max: 2 });
+    rig = await make();
+    session = rig.session;
   });
-  after(async () => {
-    await session.close();
-    await admin.unsafe(`drop schema if exists ${S} cascade`);
-    await admin.end();
-  });
+  after(() => rig.close());
 
   test('each kind is written as its column takes it and comes back as it went in, in one op, in bulk and in the feed', async () => {
     const tag = uuidv7();
@@ -395,8 +449,8 @@ create table ${S}.tasks (
     assert.deepEqual((many[0] as { record: StoredRecord }).record.tags, []);
     assert.deepEqual((many[1] as { record: StoredRecord }).record.due, null);
     assert.deepEqual((many[1] as { record: StoredRecord }).record.tags, [], 'no list is an empty list');
-    const [stored] = await admin.unsafe(`select tags::text as tags, due, content from ${S}.tasks where id = '${got.id}'`);
-    assert.equal(stored!.tags, `{${fields.tags.join(',')}}`, 'a uuid array');
+    const stored = await rig.stored(got.id);
+    assert.deepEqual(stored.tags, fields.tags, 'a list of ids');
     assert.deepEqual(stored!.due, fields.due, 'jsonb, as the device sent it');
     assert.deepEqual(stored!.content, { notes: 'what I wrote' }, 'content apart from the columns');
     const feed = await session.work({ person: P }, (w) => w.changes(0, 10));
@@ -407,3 +461,53 @@ create table ${S}.tasks (
     await assert.rejects(session.work({ person: P }, (w) => w.find('tasks', { where: { tags: [tag] as never } })), /not_queryable/);
   });
 });
+}
+
+kindsContract(
+  'Postgres',
+  async () => {
+    const S = 'se2_kinds';
+    const admin = pg(URL_!, { max: 2, onnotice: () => {} });
+    await admin.unsafe(ddl(S, false) + `
+create table ${S}.tasks (
+  user_id uuid not null, id uuid not null, rev bigint not null, version integer not null default 1,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(), client_updated_at timestamptz, deleted_at timestamptz,
+  content jsonb not null default '{}', enc smallint not null default 0, key_version integer not null default 0,
+  title text, size integer, est double precision, done boolean, due_at timestamptz, tags uuid[] not null default '{}', due jsonb,
+  primary key (user_id, id));`);
+    const session = createEngine({ store: kindsStore, backend: postgres }).connect({ url: URL_!, schema: S, max: 2 });
+    return {
+      session,
+      stored: async (id) => {
+        const [r] = await admin.unsafe(`select array_to_json(tags) as tags, due, content from ${S}.tasks where id = $1`, [id]);
+        return { tags: r!.tags, due: r!.due, content: r!.content };
+      },
+      close: async () => {
+        await session.close();
+        await admin.unsafe(`drop schema if exists ${S} cascade`);
+        await admin.end();
+      },
+    };
+  },
+  noDb,
+);
+
+kindsContract(
+  'SQLite',
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'se2-kinds-'));
+    const path = join(dir, 'kinds.db');
+    const engine = createEngine({ store: kindsStore, backend: sqlite });
+    await engine.migrate({ path }, await engine.plan({ path }));
+    const session = engine.connect({ path });
+    return {
+      session,
+      stored: async (id) => {
+        const [r] = sqliteRows(path, `select tags, due, content from tasks where id = ?`, id);
+        return { tags: r!.tags, due: r!.due, content: r!.content };
+      },
+      close: async () => rmSync(dir, { recursive: true, force: true }),
+    };
+  },
+  false,
+);
