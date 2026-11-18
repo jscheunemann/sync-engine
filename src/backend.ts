@@ -51,6 +51,8 @@ export interface TableLayout {
   readonly person?: string;
   /** Columns a find filters and orders by (indexed). */
   readonly query?: readonly string[];
+  /** Values inside JSON columns, by name: a condition, group or measure on one reads it from its column. */
+  readonly paths?: Readonly<Record<string, { readonly from: string; readonly path: readonly string[]; readonly kind: 'text' | 'number' | 'boolean' }>>;
 }
 
 /** A database rule refused a write (a check, a unique key, a reference). The core decides what that means for the op. */
@@ -76,7 +78,7 @@ export interface Tombstone {
 /** One condition on a column. The core builds these from declared fields only; the backend writes them as it must. */
 export type Cond =
   | { col: string; op: 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte'; value: unknown }
-  | { col: string; op: 'in'; value: readonly unknown[] }
+  | { col: string; op: 'in' | 'nin'; value: readonly unknown[] }
   | { col: string; op: 'null' | 'notnull' };
 
 /** A read of rows from one table (ADR 0003's find and count). */
@@ -93,12 +95,30 @@ export interface Query {
   limit?: number;
 }
 
+/** A summary (ADR 0016): conditions, groups and measures on checked columns (a column or a declared path's name). */
+export interface SummaryQuery {
+  table: string;
+  person: string | null;
+  personColumn: string;
+  where: readonly Cond[];
+  by: readonly ({ col: string; as: string } | { day: string; zone: string; as: string })[];
+  measures: readonly {
+    as: string;
+    fn: 'count' | 'distinct' | 'sum' | 'avg' | 'min' | 'max' | 'percentile';
+    col?: string;
+    p?: number;
+    where: readonly Cond[];
+  }[];
+  order?: { as: string; desc: boolean };
+  limit: number;
+}
+
 /** What a system unit did, for the audit log (ADR 0009). Counts and names only, never content. */
 export interface AuditEntry {
   intent: string;
   by: string | null;
   type: string;
-  action: 'get' | 'find' | 'count' | 'put' | 'update' | 'remove';
+  action: 'get' | 'find' | 'count' | 'summarize' | 'put' | 'update' | 'remove';
   rows: number;
 }
 
@@ -141,8 +161,15 @@ export interface Unit {
   select(q: Query): Promise<Row[]>;
   /** How many rows match a query (its order, cursor and limit are ignored). */
   count(q: Query): Promise<number>;
-  /** Writes one row; returns it as stored. A refused write throws RuleError. */
-  insert(table: string, row: Row): Promise<Row>;
+  /**
+   * Writes one row; returns it as stored. A refused write throws RuleError. With `onConflict`, a row whose key is taken
+   * instead updates the given columns (`update`, returning the row) or is left as it is (`nothing`, returning null).
+   */
+  insert(table: string, row: Row, onConflict?: { key: readonly string[]; action: 'update' | 'nothing' }): Promise<Row | null>;
+  /** Groups and measures of the rows a summary keeps. */
+  summarize(q: SummaryQuery): Promise<Row[]>;
+  /** Holds a named lock until the unit ends: another unit asking for the same name waits. */
+  lock(name: string): Promise<void>;
   /** Changes the row matching `match` (all conditions); returns it as stored, or null when none matches. */
   update(table: string, match: readonly Cond[], cols: Row): Promise<Row | null>;
   /** Removes the rows matching `match`; returns how many. */

@@ -1,9 +1,9 @@
 import { type Backend, type Row, type SchemaPlan, type Scope } from './backend.js';
-import { type FindOptions, type SystemDecl, type TypeDecl, type Where } from './declare.js';
+import { type FindOptions, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.js';
 import type { ChangesPage, Fields, Op, Problem, ServerRecord } from './protocol.js';
 import { type FieldDecl, type StoredRecord } from './records.js';
 export { RuleError, isSystem, type SchemaPlan, type TableLayout, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.js';
-export { EngineError, type FindOptions, type Kind, type Match, type SystemDecl, type TypeDecl, type Where } from './declare.js';
+export { EngineError, type FindOptions, type GroupBy, type Kind, type Match, type Measure, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.js';
 export { type FieldDecl, type StoredRecord } from './records.js';
 /** A page of a find: the rows, and the cursor for the next page (null at the end). */
 export interface Page<R> {
@@ -20,6 +20,8 @@ export interface Reader<T extends string = string> {
     count(type: string, opts?: {
         where?: Where;
     }): Promise<number>;
+    /** Groups and measures of a type's rows, by declared fields and paths only (ADR 0016). */
+    summarize(type: string, opts: SummaryOptions): Promise<Row[]>;
 }
 /** The outcome of an update to a declared type. */
 export type UpdateResult = {
@@ -129,8 +131,15 @@ export interface Work<T extends string = string> extends Reader<T> {
         /** Replaces the prefs if `baseVersion` is current; otherwise returns the current copy to merge with. */
         put(data: Record<string, unknown>, baseVersion: number): Promise<PutPrefsResult>;
     };
-    /** Writes a new row of a declared type; returns it as stored. */
-    put(type: string, row: Row): Promise<Row>;
+    /**
+     * Writes a new row of a declared type; returns it as stored. With `onConflict` (ADR 0016), a row whose key is taken
+     * is updated with the given fields (`update`), or left as it is (`nothing`: null comes back).
+     */
+    put(type: string, row: Row, opts?: {
+        onConflict?: 'update' | 'nothing';
+    }): Promise<Row | null>;
+    /** Holds a named lock until the unit ends, so two units doing the same thing go one after the other. */
+    lock(name: string): Promise<void>;
     /** Changes the row with this key; with a `version` column, only if `version` is still current. */
     update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult>;
     /** Removes the row with this key; returns whether there was one. */

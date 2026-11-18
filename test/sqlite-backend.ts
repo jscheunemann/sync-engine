@@ -6,7 +6,7 @@
 // booleans as 0/1), and one writer at a time (units are queued).
 
 import { DatabaseSync } from 'node:sqlite';
-import { type Backend, type Cond, isSystem, type Layout, type Query, type Row, RuleError, type SchemaPlan, type TableLayout, type Tombstone, type Unit } from '../src/backend.ts';
+import { type Backend, type Cond, isSystem, type Layout, type Query, type Row, RuleError, type SchemaPlan, type SummaryQuery, type TableLayout, type Tombstone, type Unit } from '../src/backend.ts';
 import type { Kind } from '../src/declare.ts';
 
 export interface SqliteSettings {
@@ -104,6 +104,19 @@ function serial<R>(d: Db, fn: () => Promise<R>): Promise<R> {
 function unit(d: Db, layout: Layout, person: string | null): Unit {
   const s = d.db;
   const kindsOf = (t: string): Kinds => layout.columns?.[t]?.kinds ?? ENGINE[t]?.kinds ?? {};
+  const pathsOf = (t: string) => layout.columns?.[t]?.paths ?? {};
+  /** A column, or a declared JSON path read as its kind (null where the stored value isn't one), as Postgres reads it. */
+  const ref = (t: string, name: string): string => {
+    const p = pathsOf(t)[name];
+    if (!p) return q(name);
+    const c = q(p.from);
+    const jp = `'$${p.path.map((k) => `."${k.replace(/["\\]/g, '').replace(/'/g, "''")}"`).join('')}'`;
+    const ty = `json_type(${c}, ${jp})`;
+    if (p.kind === 'number') return `(case when ${ty} in ('integer', 'real') then json_extract(${c}, ${jp}) end)`;
+    if (p.kind === 'boolean') return `(case ${ty} when 'true' then 1 when 'false' then 0 end)`;
+    return `(case when ${ty} in ('true', 'false') then ${ty} when ${ty} in ('null') then null else cast(json_extract(${c}, ${jp}) as text) end)`;
+  };
+  const kindOf = (t: string, name: string): Kind | undefined => pathsOf(t)[name]?.kind ?? kindsOf(t)[name];
   const declared = (t: string) => {
     if (!layout.types.includes(t) && !(layout.tables ?? []).includes(t)) throw new Error('unknown_table');
     return q(t);
@@ -133,8 +146,8 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
     return { sql: names.map((n) => `${q(n)} = ?`).join(', '), params: names.map((n) => enc(k[n], cols[n])) };
   };
   const cond = (t: string, c: Cond): { sql: string; params: unknown[] } => {
-    const col = q(c.col);
-    const k = kindsOf(t)[c.col];
+    const col = ref(t, c.col);
+    const k = kindOf(t, c.col);
     switch (c.op) {
       case 'null':
         return { sql: `${col} is null`, params: [] };
@@ -142,6 +155,8 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
         return { sql: `${col} is not null`, params: [] };
       case 'in':
         return c.value.length ? { sql: `${col} in (${c.value.map(() => '?').join(', ')})`, params: c.value.map((v) => enc(k, v)) } : { sql: '0', params: [] };
+      case 'nin':
+        return c.value.length ? { sql: `${col} not in (${c.value.map(() => '?').join(', ')})`, params: c.value.map((v) => enc(k, v)) } : { sql: '1', params: [] };
       case 'ne':
         return { sql: `${col} is not ?`, params: [enc(k, c.value)] };
       default: {
@@ -166,14 +181,85 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
       const pastKey = { sql: `${keys} ${desc ? '<' : '>'} ${vals}`, params: keyVals.map((v, i) => enc(k[qy.key[i]!], v)) };
       if (!qy.order) extra.push(pastKey);
       else {
-        const col = q(qy.order.col);
+        const col = ref(qy.table, qy.order.col);
         const v = qy.after[0];
-        const kv = enc(k[qy.order.col], v);
+        const kv = enc(kindOf(qy.table, qy.order.col), v);
         if (v === null) extra.push({ sql: `${col} is null and ${pastKey.sql}`, params: pastKey.params });
         else extra.push({ sql: `${col} ${desc ? '<' : '>'} ? or (${col} = ? and ${pastKey.sql}) or ${col} is null`, params: [kv, kv, ...pastKey.params] });
       }
     }
     return where(qy.table, qy.where, extra);
+  };
+
+  /** A summary, computed here: SQLite has no percentiles, and a test backend can be plain rather than fast. */
+  const summarize = (sq: SummaryQuery): Row[] => {
+    const t = sq.table;
+    const paths = Object.keys(pathsOf(t));
+    const f = filter({ table: t, person: sq.person, personColumn: sq.personColumn, where: sq.where, key: [] });
+    const extra = paths.map((p) => `, ${ref(t, p)} as ${q(p)}`).join('');
+    const rows = all(t, `select *${extra} from ${declared(t)} where ${f.sql}`, f.params);
+    const holds = (r: Row, c: Cond): boolean => {
+      const v = r[c.col] ?? null;
+      const e = (x: unknown) => enc(kindOf(t, c.col), x);
+      const sv = v === null ? null : enc(kindOf(t, c.col), v);
+      switch (c.op) {
+        case 'null': return v === null;
+        case 'notnull': return v !== null;
+        case 'in': return v !== null && c.value.some((x) => e(x) === sv);
+        case 'nin': return v !== null && !c.value.some((x) => e(x) === sv);
+        case 'eq': return v !== null && e(c.value) === sv;
+        case 'ne': return v === null || e(c.value) !== sv;
+        case 'gt': return v !== null && (sv as number) > (e(c.value) as number);
+        case 'gte': return v !== null && (sv as number) >= (e(c.value) as number);
+        case 'lt': return v !== null && (sv as number) < (e(c.value) as number);
+        case 'lte': return v !== null && (sv as number) <= (e(c.value) as number);
+      }
+    };
+    const dayIn = (v: unknown, zone: string) => new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(String(v)));
+    const groups = new Map<string, { key: Row; rows: Row[] }>();
+    for (const r of rows) {
+      const key: Row = {};
+      for (const g of sq.by) key[g.as] = 'col' in g ? (r[g.col] ?? null) : r[g.day] == null ? null : dayIn(r[g.day], g.zone);
+      const k = JSON.stringify(key);
+      if (!groups.has(k)) groups.set(k, { key, rows: [] });
+      groups.get(k)!.rows.push(r);
+    }
+    if (!sq.by.length && !groups.size) groups.set('{}', { key: {}, rows: [] });
+    const out: Row[] = [];
+    for (const { key, rows: rs } of groups.values()) {
+      const o: Row = { ...key };
+      for (const m of sq.measures) {
+        const kept = rs.filter((r) => m.where.every((c) => holds(r, c)));
+        const vals = m.col === undefined ? [] : kept.map((r) => r[m.col!]).filter((v) => v !== null && v !== undefined);
+        const nums = vals.map(Number).sort((a, b) => a - b);
+        const cmp = (a: unknown, b: unknown) => (String(enc(kindOf(t, m.col!), a)) < String(enc(kindOf(t, m.col!), b)) ? -1 : 1);
+        switch (m.fn) {
+          case 'count': o[m.as] = kept.length; break;
+          case 'distinct': o[m.as] = new Set(vals.map((v) => JSON.stringify(v))).size; break;
+          case 'sum': o[m.as] = nums.length ? nums.reduce((a, b) => a + b, 0) : null; break;
+          case 'avg': o[m.as] = nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null; break;
+          case 'min': o[m.as] = vals.length ? [...vals].sort((a, b) => (typeof a === 'number' ? (a as number) - (b as number) : cmp(a, b)))[0] : null; break;
+          case 'max': o[m.as] = vals.length ? [...vals].sort((a, b) => (typeof a === 'number' ? (b as number) - (a as number) : cmp(b, a)))[0] : null; break;
+          case 'percentile': {
+            if (!nums.length) { o[m.as] = null; break; }
+            const pos = m.p! * (nums.length - 1), lo = Math.floor(pos), hi = Math.ceil(pos);
+            o[m.as] = nums[lo]! + (nums[hi]! - nums[lo]!) * (pos - lo);
+          }
+        }
+      }
+      out.push(o);
+    }
+    if (sq.order) {
+      const { as, desc } = sq.order;
+      out.sort((a, b) => {
+        const x = a[as], y = b[as];
+        if (x === y) return 0;
+        if (x === null || x === undefined) return 1;
+        if (y === null || y === undefined) return -1;
+        return (x < y ? -1 : 1) * (desc ? -1 : 1);
+      });
+    }
+    return out.slice(0, sq.limit);
   };
 
   const u: Unit = {
@@ -242,7 +328,7 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
     select: async (qy) => {
       const t = declared(qy.table);
       const dir = qy.order?.desc ? 'desc' : 'asc';
-      const order = [...(qy.order ? [`${q(qy.order.col)} ${dir} nulls last`] : []), ...qy.key.map((k) => `${q(k)} ${dir}`)].join(', ');
+      const order = [...(qy.order ? [`${ref(qy.table, qy.order.col)} ${dir} nulls last`] : []), ...qy.key.map((k) => `${q(k)} ${dir}`)].join(', ');
       const f = filter(qy);
       return all(qy.table, `select * from ${t} where ${f.sql} order by ${order}${qy.limit !== undefined ? ` limit ${Number(qy.limit)}` : ''}`, f.params);
     },
@@ -250,11 +336,18 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
       const f = filter({ ...qy, after: undefined });
       return Number(one(qy.table, `select count(*) as n from ${declared(qy.table)} where ${f.sql}`, f.params)!.n);
     },
-    insert: async (table, row) => {
+    insert: async (table, row, onConflict) => {
       const k = kindsOf(table);
       const names = Object.keys(row);
-      return one(table, `insert into ${declared(table)} (${names.map(q).join(', ')}) values (${names.map(() => '?').join(', ')}) returning *`, names.map((n) => enc(k[n], row[n])))!;
+      let conflict = '';
+      if (onConflict) {
+        const rest = names.filter((n) => !onConflict.key.includes(n));
+        conflict = ` on conflict (${onConflict.key.map(q).join(', ')}) do ${onConflict.action === 'update' && rest.length ? `update set ${rest.map((n) => `${q(n)} = excluded.${q(n)}`).join(', ')}` : 'nothing'}`;
+      }
+      return one(table, `insert into ${declared(table)} (${names.map(q).join(', ')}) values (${names.map(() => '?').join(', ')})${conflict} returning *`, names.map((n) => enc(k[n], row[n])));
     },
+    summarize: async (sq) => summarize(sq),
+    lock: async () => {}, // one writer at a time already
     update: async (table, match, changes) => {
       const w = where(table, match);
       if (!Object.keys(changes).length) return one(table, `select * from ${declared(table)} where ${w.sql}`, w.params);

@@ -11,12 +11,12 @@
 // The rules are version 1's (server.ts) unchanged: the contract tests run the same cases against both.
 
 import { type AuditEntry, type Backend, type Cond, type Connection, isSystem, type Row, RuleError, type SchemaPlan, type Scope, type TableLayout, type Unit } from './backend.ts';
-import { conditions, cursor, EngineError, type FindOptions, fits, type Kind, out, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
+import { conditions, cursor, EngineError, type FindOptions, fits, type Kind, out, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
 import type { ChangesPage, Fields, Op, Problem, ServerRecord } from './protocol.ts';
 import { type FieldDecl, RecordType, type StoredRecord } from './records.ts';
 
 export { RuleError, isSystem, type SchemaPlan, type TableLayout, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.ts';
-export { EngineError, type FindOptions, type Kind, type Match, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
+export { EngineError, type FindOptions, type GroupBy, type Kind, type Match, type Measure, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
 
 export { type FieldDecl, type StoredRecord } from './records.ts';
 
@@ -34,6 +34,8 @@ export interface Reader<T extends string = string> {
   find(type: T, opts?: FindOptions): Promise<Page<StoredRecord>>;
   find(type: string, opts?: FindOptions): Promise<Page<Row>>;
   count(type: string, opts?: { where?: Where }): Promise<number>;
+  /** Groups and measures of a type's rows, by declared fields and paths only (ADR 0016). */
+  summarize(type: string, opts: SummaryOptions): Promise<Row[]>;
 }
 
 /** The outcome of an update to a declared type. */
@@ -152,8 +154,13 @@ export interface Work<T extends string = string> extends Reader<T> {
     /** Replaces the prefs if `baseVersion` is current; otherwise returns the current copy to merge with. */
     put(data: Record<string, unknown>, baseVersion: number): Promise<PutPrefsResult>;
   };
-  /** Writes a new row of a declared type; returns it as stored. */
-  put(type: string, row: Row): Promise<Row>;
+  /**
+   * Writes a new row of a declared type; returns it as stored. With `onConflict` (ADR 0016), a row whose key is taken
+   * is updated with the given fields (`update`), or left as it is (`nothing`: null comes back).
+   */
+  put(type: string, row: Row, opts?: { onConflict?: 'update' | 'nothing' }): Promise<Row | null>;
+  /** Holds a named lock until the unit ends, so two units doing the same thing go one after the other. */
+  lock(name: string): Promise<void>;
   /** Changes the row with this key; with a `version` column, only if `version` is still current. */
   update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult>;
   /** Removes the row with this key; returns whether there was one. */
@@ -213,6 +220,7 @@ export function createEngine<T extends string, S>(opts: {
       access: d.access,
       ...(person ? { person } : {}),
       query: (d.query ?? []).filter((f) => !d.key.includes(f)),
+      ...(d.paths ? { paths: d.paths } : {}),
     };
   }
   const layout = { types: store.types, tables, columns };
@@ -284,6 +292,16 @@ interface Shape {
 }
 
 const FIND_LIMIT = 100;
+/** An IANA time zone the runtime knows. */
+const validZone = (z: unknown): z is string => {
+  if (typeof z !== 'string' || !/^[A-Za-z0-9_+\-/]{1,64}$/.test(z)) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: z });
+    return true;
+  } catch {
+    return false;
+  }
+};
 /** The engine's own tables in an app's schema: never an app's declared type. */
 const ENGINE_TABLES = ['counters', 'applied_ops', 'prefs', 'engine_audit'];
 const FIND_MAX = 1000;
@@ -298,6 +316,12 @@ function checkTypes(types: Readonly<Record<string, TypeDecl>>): void {
     for (const k of d.sealed ?? []) if (d.fields[k] !== 'json') throw new EngineError('sealed_not_json', `${name}.${k}`);
     if (d.version && d.fields[d.version] !== 'number') throw new EngineError('version_not_number', `${name}.${d.version}`);
     if (d.access === 'person' && d.fields[d.personColumn ?? 'user_id']) throw new EngineError('person_column_declared', `${name}.${d.personColumn ?? 'user_id'}`);
+    for (const [p, x] of Object.entries(d.paths ?? {})) {
+      if (d.fields[p]) throw new EngineError('path_is_a_field', `${name}.${p}`);
+      if (d.fields[x.from] !== 'json') throw new EngineError('path_not_in_json', `${name}.${p}`);
+      if (!x.path.length || x.path.some((k) => typeof k !== 'string' || !k || k.length > 100)) throw new EngineError('bad_path', `${name}.${p}`);
+      if (!['text', 'number', 'boolean'].includes(x.kind)) throw new EngineError('bad_path', `${name}.${p}`);
+    }
   }
 }
 
@@ -343,6 +367,7 @@ class Core<T extends string> {
     if (!d) throw new EngineError('unknown_type', type);
     const queryable = new Map<string, { col: string; kind: Kind }>();
     for (const n of [...d.key, ...(d.query ?? [])]) queryable.set(n, { col: n, kind: d.fields[n]! });
+    for (const [n, x] of Object.entries(d.paths ?? {})) queryable.set(n, { col: n, kind: x.kind });
     return { name: type, table: d.table ?? type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
   }
 
@@ -362,7 +387,7 @@ class Core<T extends string> {
     return this.person;
   }
 
-  private async audit(sh: Shape, action: 'get' | 'find' | 'count' | 'put' | 'update' | 'remove', rows: number): Promise<void> {
+  private async audit(sh: Shape, action: 'get' | 'find' | 'count' | 'summarize' | 'put' | 'update' | 'remove', rows: number): Promise<void> {
     if (this.intent) await this.u.audit({ intent: this.intent.name, by: this.intent.by, type: sh.name, action, rows });
   }
 
@@ -417,6 +442,74 @@ class Core<T extends string> {
     return n;
   }
 
+  private async summarize(u: Unit, type: string, o: SummaryOptions): Promise<Row[]> {
+    const sh = this.shape(type);
+    const person = this.allow(sh, false);
+    const field = (name: string) => {
+      const f = sh.queryable.get(name);
+      if (!f) throw new EngineError('not_queryable', name);
+      return f;
+    };
+    const alias = (a: string) => {
+      if (!/^[a-z][a-z0-9_]{0,62}$/i.test(a)) throw new EngineError('bad_name', a);
+      return a;
+    };
+    const kinds = new Map<string, Kind | 'day'>();
+    const by = (o.by ?? []).map((g) => {
+      if (typeof g === 'string') {
+        const f = field(g);
+        kinds.set(g, f.kind);
+        return { col: f.col, as: alias(g) };
+      }
+      const f = field(g.day);
+      if (f.kind !== 'time') throw new EngineError('not_a_time', g.day);
+      if (!validZone(g.zone)) throw new EngineError('bad_zone', 'zone');
+      const as = alias(g.as ?? g.day);
+      kinds.set(as, 'day');
+      return { day: f.col, zone: g.zone, as };
+    });
+    if (by.length > 6) throw new EngineError('too_many_groups');
+    const measures = Object.entries(o.measures ?? {}).map(([as, m]) => {
+      alias(as);
+      if (kinds.has(as)) throw new EngineError('name_taken', as);
+      const where = conditions(m.where, sh.queryable);
+      const fns = (['count', 'distinct', 'sum', 'avg', 'min', 'max', 'percentile'] as const).filter((k) => k in m);
+      if (fns.length !== 1) throw new EngineError('bad_measure', as);
+      const fn = fns[0]!;
+      if (fn === 'count') {
+        if ((m as { count: unknown }).count !== true) throw new EngineError('bad_measure', as);
+        kinds.set(as, 'integer');
+        return { as, fn, where };
+      }
+      const f = field((m as Record<string, unknown>)[fn] as string);
+      if (['sum', 'avg', 'percentile'].includes(fn) && f.kind !== 'number' && f.kind !== 'integer') throw new EngineError('not_a_number', as);
+      const p = (m as { p?: number }).p;
+      if (fn === 'percentile' && !(typeof p === 'number' && p > 0 && p <= 1)) throw new EngineError('bad_measure', as);
+      kinds.set(as, fn === 'distinct' ? 'integer' : fn === 'min' || fn === 'max' ? f.kind : 'number');
+      return { as, fn, col: f.col, where, ...(fn === 'percentile' ? { p: p! } : {}) };
+    });
+    if (!measures.length || measures.length > 20) throw new EngineError('bad_measure');
+    let order: { as: string; desc: boolean } | undefined;
+    if (o.order !== undefined) {
+      const desc = o.order.startsWith('-');
+      const as = desc ? o.order.slice(1) : o.order;
+      if (!kinds.has(as)) throw new EngineError('not_queryable', as);
+      order = { as, desc };
+    }
+    const limit = o.limit ?? FIND_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > FIND_MAX) throw new EngineError('bad_limit');
+    const rows = await u.summarize({ table: sh.table, person, personColumn: sh.personColumn, where: conditions(o.where, sh.queryable), by, measures, ...(order ? { order } : {}), limit });
+    await this.audit(sh, 'summarize', rows.length);
+    return rows.map((r) => {
+      const o: Row = {};
+      for (const [k, kind] of kinds) {
+        const v = r[k];
+        o[k] = kind === 'day' ? (v === null || v === undefined ? null : String(v).slice(0, 10)) : out(kind, v);
+      }
+      return o;
+    });
+  }
+
   /** A declared type, for a write: records are written only through apply. */
   private writable(type: string): { sh: Shape; person: string | null } {
     const sh = this.shape(type);
@@ -457,7 +550,7 @@ class Core<T extends string> {
     throw e;
   }
 
-  private async put(type: string, given: Row): Promise<Row> {
+  private async put(type: string, given: Row, opts: { onConflict?: 'update' | 'nothing' } = {}): Promise<Row | null> {
     const { sh, person } = this.writable(type);
     const row = { ...given };
     let who: unknown = person;
@@ -472,9 +565,11 @@ class Core<T extends string> {
     if (sh.decl?.version && c[sh.decl.version] === undefined) c[sh.decl.version] = 1;
     if (sh.access === 'person') c[sh.personColumn] = who;
     try {
-      const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c));
-      await this.audit(sh, 'put', 1);
-      return this.outRow(sh, stored);
+      if (opts.onConflict !== undefined && !['update', 'nothing'].includes(opts.onConflict)) throw new EngineError('bad_on_conflict');
+      const key = [...(sh.access === 'person' ? [sh.personColumn] : []), ...sh.key];
+      const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c, opts.onConflict ? { key, action: opts.onConflict } : undefined));
+      await this.audit(sh, 'put', stored ? 1 : 0);
+      return stored ? this.outRow(sh, stored) : null;
     } catch (e) {
       this.refused(e);
     }
@@ -534,6 +629,7 @@ class Core<T extends string> {
       },
       find: ((type: string, opts?: FindOptions) => this.find(u, type, opts)) as Reader<T>['find'],
       count: (type, opts) => this.count(u, type, opts),
+      summarize: (type, opts) => this.summarize(u, type, opts),
     };
   }
 
@@ -545,10 +641,15 @@ class Core<T extends string> {
       getMany: r.getMany,
       find: r.find,
       count: r.count,
+      summarize: r.summarize,
       apply: (ops, now) => (p(), this.apply(ops, now ?? new Date().toISOString())),
       changes: (since, limit) => (p(), this.changes(since, limit)),
       prefs: { get: () => (p(), this.getPrefs()), put: (data, base) => (p(), this.putPrefs(data, base)) },
-      put: (type, row) => this.put(type, row),
+      put: (type, row, opts) => this.put(type, row, opts),
+      lock: async (name) => {
+        if (typeof name !== 'string' || !name || name.length > 200) throw new EngineError('bad_lock');
+        await this.u.lock(name);
+      },
       update: (type, key, changes, version) => this.update(type, key, changes, version),
       remove: (type, key) => this.remove(type, key),
     };

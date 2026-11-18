@@ -44,10 +44,25 @@ function cols(tx, row, kinds) {
         out[k] = param(tx, v, kinds[k]);
     return out;
 }
+/** A Postgres text array literal: each key quoted, so a path key can hold any character. */
+const textArray = (keys) => `{${keys.map((k) => `"${k.replace(/[\\"]/g, (m) => `\\${m}`)}"`).join(',')}}`;
+/** A column, or a declared JSON path read from its column as its kind (null where the stored value isn't one). */
+function ref(tx, c, name) {
+    const p = c.paths[name];
+    if (!p)
+        return tx `${tx(name)}`;
+    const from = tx(p.from);
+    const path = textArray(p.path);
+    if (p.kind === 'text')
+        return tx `(${from} #>> ${path}::text[])`;
+    const pg = p.kind === 'number' ? tx `double precision` : tx `boolean`;
+    return tx `(case when jsonb_typeof(${from} #> ${path}::text[]) = ${p.kind} then (${from} #>> ${path}::text[])::${pg} end)`;
+}
+const kindOf = (c, name) => c.paths[name]?.kind ?? c.kinds[name];
 /** One condition as SQL. Columns are names the engine checked against the app's declarations. */
-function cond(tx, c, kinds) {
-    const k = kinds[c.col];
-    const col = tx(c.col);
+function cond(tx, c, cs) {
+    const k = kindOf(cs, c.col);
+    const col = ref(tx, cs, c.col);
     switch (c.op) {
         case 'null':
             return tx `${col} is null`;
@@ -55,6 +70,8 @@ function cond(tx, c, kinds) {
             return tx `${col} is not null`;
         case 'in':
             return c.value.length ? tx `${col} in ${tx(c.value.map((v) => param(tx, v, k)))}` : tx `false`;
+        case 'nin':
+            return c.value.length ? tx `${col} not in ${tx(c.value.map((v) => param(tx, v, k)))}` : tx `true`;
         case 'eq':
             return tx `${col} = ${param(tx, c.value, k)}`;
         case 'ne':
@@ -72,8 +89,9 @@ function cond(tx, c, kinds) {
 const and = (tx, parts) => (parts.length ? parts.reduce((a, b) => tx `${a} and ${b}`) : tx `true`);
 const or = (tx, parts) => parts.reduce((a, b) => tx `(${a}) or (${b})`);
 /** The conditions of a query: its own, its person, and its cursor (keyset paging; nulls in the order column last). */
-function filter(tx, q, kinds) {
-    const parts = q.where.map((c) => cond(tx, c, kinds));
+function filter(tx, q, cs) {
+    const kinds = cs.kinds;
+    const parts = q.where.map((c) => cond(tx, c, cs));
     if (q.person !== null)
         parts.push(tx `${tx(q.personColumn)} = ${q.person}`);
     if (q.after) {
@@ -85,13 +103,13 @@ function filter(tx, q, kinds) {
         if (!q.order)
             parts.push(pastKey);
         else {
-            const col = tx(q.order.col);
+            const col = ref(tx, cs, q.order.col);
             const v = q.after[0];
             if (v === null)
                 parts.push(tx `${col} is null and ${pastKey}`);
             else {
-                const past = desc ? tx `${col} < ${param(tx, v, kinds[q.order.col])}` : tx `${col} > ${param(tx, v, kinds[q.order.col])}`;
-                parts.push(tx `(${or(tx, [past, tx `${col} = ${param(tx, v, kinds[q.order.col])} and ${pastKey}`, tx `${col} is null`])})`);
+                const past = desc ? tx `${col} < ${param(tx, v, kindOf(cs, q.order.col))}` : tx `${col} > ${param(tx, v, kindOf(cs, q.order.col))}`;
+                parts.push(tx `(${or(tx, [past, tx `${col} = ${param(tx, v, kindOf(cs, q.order.col))} and ${pastKey}`, tx `${col} is null`])})`);
             }
         }
     }
@@ -99,6 +117,7 @@ function filter(tx, q, kinds) {
 }
 function unit(tx, layout, schema, person) {
     const kindsOf = (t) => layout.columns?.[t]?.kinds ?? {};
+    const colsOf = (t) => ({ kinds: kindsOf(t), paths: layout.columns?.[t]?.paths ?? {} });
     const table = (name) => tx `${tx(schema)}.${tx(name)}`;
     const declared = (name) => {
         if (!layout.types.includes(name) && !(layout.tables ?? []).includes(name))
@@ -232,21 +251,30 @@ function unit(tx, layout, schema, person) {
             const t = declared(q.table);
             const dir = q.order?.desc ? tx `desc` : tx `asc`;
             const keyOrder = q.key.map((k) => tx `${tx(k)} ${dir}`);
-            const order = [...(q.order ? [tx `${tx(q.order.col)} ${dir} nulls last`] : []), ...keyOrder].reduce((a, b) => tx `${a}, ${b}`);
+            const order = [...(q.order ? [tx `${ref(tx, colsOf(q.table), q.order.col)} ${dir} nulls last`] : []), ...keyOrder].reduce((a, b) => tx `${a}, ${b}`);
             const limit = q.limit !== undefined ? tx `limit ${q.limit}` : tx ``;
-            return (await tx `select * from ${t} where ${filter(tx, q, kindsOf(q.table))} order by ${order} ${limit}`);
+            return (await tx `select * from ${t} where ${filter(tx, q, colsOf(q.table))} order by ${order} ${limit}`);
         },
         count: async (q) => {
             const t = declared(q.table);
-            const [row] = await tx `select count(*)::int as n from ${t} where ${filter(tx, { ...q, after: undefined }, kindsOf(q.table))}`;
+            const [row] = await tx `select count(*)::int as n from ${t} where ${filter(tx, { ...q, after: undefined }, colsOf(q.table))}`;
             return Number(row.n);
         },
-        insert: async (name, row) => {
+        insert: async (name, row, onConflict) => {
             const t = declared(name);
             const c = cols(tx, row, kindsOf(name));
+            const list = (names) => names.map((n) => tx `${tx(n)}`).reduce((a, b) => tx `${a}, ${b}`);
+            let conflict = tx ``;
+            if (onConflict) {
+                const rest = Object.keys(c).filter((k) => !onConflict.key.includes(k));
+                conflict =
+                    onConflict.action === 'update' && rest.length
+                        ? tx `on conflict (${list(onConflict.key)}) do update set ${rest.map((k) => tx `${tx(k)} = excluded.${tx(k)}`).reduce((a, b) => tx `${a}, ${b}`)}`
+                        : tx `on conflict (${list(onConflict.key)}) do nothing`;
+            }
             try {
-                const [stored] = await tx `insert into ${t} ${tx(c)} returning *`;
-                return stored;
+                const [stored] = await tx `insert into ${t} ${tx(c)} ${conflict} returning *`;
+                return stored ?? null;
             }
             catch (e) {
                 throw rule(e);
@@ -256,11 +284,11 @@ function unit(tx, layout, schema, person) {
             const t = declared(name);
             const c = cols(tx, changes, kindsOf(name));
             if (!Object.keys(c).length) {
-                const [row] = await tx `select * from ${t} where ${and(tx, match.map((m) => cond(tx, m, kindsOf(name))))} for update`;
+                const [row] = await tx `select * from ${t} where ${and(tx, match.map((m) => cond(tx, m, colsOf(name))))} for update`;
                 return row ?? null;
             }
             try {
-                const [row] = await tx `update ${t} set ${tx(c)} where ${and(tx, match.map((m) => cond(tx, m, kindsOf(name))))} returning *`;
+                const [row] = await tx `update ${t} set ${tx(c)} where ${and(tx, match.map((m) => cond(tx, m, colsOf(name))))} returning *`;
                 return row ?? null;
             }
             catch (e) {
@@ -271,12 +299,34 @@ function unit(tx, layout, schema, person) {
             const t = declared(name);
             try {
                 // Counted from what came back: the result's `count` isn't promised on every driver version.
-                const r = await tx `delete from ${t} where ${and(tx, match.map((m) => cond(tx, m, kindsOf(name))))} returning 1 as gone`;
+                const r = await tx `delete from ${t} where ${and(tx, match.map((m) => cond(tx, m, colsOf(name))))} returning 1 as gone`;
                 return r.length;
             }
             catch (e) {
                 throw rule(e);
             }
+        },
+        summarize: async (q) => {
+            const t = declared(q.table);
+            const cs = colsOf(q.table);
+            const sel = [];
+            for (const g of q.by)
+                sel.push('col' in g ? tx `${ref(tx, cs, g.col)} as ${tx(g.as)}` : tx `((${tx(g.day)} at time zone ${g.zone})::date)::text as ${tx(g.as)}`);
+            for (const m of q.measures) {
+                const e = m.col !== undefined ? ref(tx, cs, m.col) : tx ``;
+                const agg = m.fn === 'count' ? tx `count(*)`
+                    : m.fn === 'distinct' ? tx `count(distinct ${e})`
+                        : m.fn === 'percentile' ? tx `percentile_cont(${m.p}::double precision) within group (order by ${e})`
+                            : m.fn === 'sum' ? tx `sum(${e})` : m.fn === 'avg' ? tx `avg(${e})` : m.fn === 'min' ? tx `min(${e})` : tx `max(${e})`;
+                sel.push(m.where.length ? tx `${agg} filter (where ${and(tx, m.where.map((c) => cond(tx, c, cs)))}) as ${tx(m.as)}` : tx `${agg} as ${tx(m.as)}`);
+            }
+            const where = filter(tx, { table: q.table, person: q.person, personColumn: q.personColumn, where: q.where, key: [] }, cs);
+            const group = q.by.length ? tx `group by ${q.by.map((_, i) => tx `${i + 1}`).reduce((a, b) => tx `${a}, ${b}`)}` : tx ``;
+            const order = q.order ? tx `order by ${tx(q.order.as)} ${q.order.desc ? tx `desc` : tx `asc`} nulls last` : tx ``;
+            return (await tx `select ${sel.reduce((a, b) => tx `${a}, ${b}`)} from ${t} where ${where} ${group} ${order} limit ${q.limit}`);
+        },
+        lock: async (name) => {
+            await tx `select pg_advisory_xact_lock(hashtext(${`${schema}:${name}`}))`;
         },
         audit: async (a) => {
             await tx `insert into ${table('engine_audit')} (intent, by_person, type, action, rows) values (${a.intent}, ${a.by}, ${a.type}, ${a.action}, ${a.rows})`;

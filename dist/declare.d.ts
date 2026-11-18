@@ -25,6 +25,15 @@ export interface TypeDecl {
     fields: Readonly<Record<string, Kind>>;
     /** Fields a find may filter and order by (key fields always may). */
     query?: readonly string[];
+    /**
+     * Values inside a `json` field, by name (ADR 0016): read-only, and usable wherever a query field is (filters, order,
+     * a summary's groups and measures). A number or boolean path is null where the stored value isn't one.
+     */
+    paths?: Readonly<Record<string, {
+        from: string;
+        path: readonly string[];
+        kind: 'text' | 'number' | 'boolean';
+    }>>;
     /** A number column the engine uses for optimistic concurrency: an update names the version it saw. */
     version?: string;
     /** `json` fields holding what people wrote: sealed and opened with the app's ContentCrypto (ADR 0010). */
@@ -40,6 +49,8 @@ export interface SystemDecl {
 /** A condition on one field: a value (equals), or one operator. */
 export type Match = string | number | boolean | null | {
     in: readonly unknown[];
+} | {
+    nin: readonly unknown[];
 } | {
     ne: unknown;
 } | {
@@ -64,6 +75,40 @@ export interface FindOptions {
     limit?: number;
     /** The `next` of the page before. */
     after?: string;
+}
+/** One measure of a summary (ADR 0016), each over the rows its `where` (if any) keeps. */
+export type Measure = {
+    where?: Where;
+} & ({
+    count: true;
+} | {
+    distinct: string;
+} | {
+    sum: string;
+} | {
+    avg: string;
+} | {
+    min: string;
+} | {
+    max: string;
+} | {
+    percentile: string;
+    p: number;
+});
+/** A group of a summary: a field, or a time field's local day in a time zone (`YYYY-MM-DD`). */
+export type GroupBy = string | {
+    day: string;
+    zone: string;
+    as?: string;
+};
+export interface SummaryOptions {
+    where?: Where;
+    by?: readonly GroupBy[];
+    measures: Readonly<Record<string, Measure>>;
+    /** A measure or group to order by, ascending; `-name` for descending. */
+    order?: string;
+    /** At most this many groups (default 100, at most 1000). */
+    limit?: number;
 }
 /** A refused intent: a code, and the field when there is one; never a value (no user data in errors). */
 export declare class EngineError extends Error {

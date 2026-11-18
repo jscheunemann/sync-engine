@@ -14,7 +14,7 @@ export class EngineError extends Error {
             this.field = field;
     }
 }
-const OPS = ['in', 'ne', 'gt', 'gte', 'lt', 'lte', 'is', 'not'];
+const OPS = ['in', 'nin', 'ne', 'gt', 'gte', 'lt', 'lte', 'is', 'not'];
 /** Whether a value is right for a kind (null always is: the table's own rules decide whether it's allowed). */
 export function fits(kind, v) {
     if (v === null)
@@ -88,10 +88,10 @@ export function conditions(where, fields) {
                     throw new EngineError('bad_match', name);
                 conds.push({ col: f.col, op: op === 'is' ? 'null' : 'notnull' });
             }
-            else if (op === 'in') {
+            else if (op === 'in' || op === 'nin') {
                 if (!Array.isArray(v) || v.length > 1000)
                     throw new EngineError('bad_value', name);
-                conds.push({ col: f.col, op: 'in', value: v.map(check) });
+                conds.push({ col: f.col, op, value: v.map(check) });
             }
             else
                 conds.push({ col: f.col, op, value: check(v) });

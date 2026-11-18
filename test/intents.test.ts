@@ -37,9 +37,18 @@ const types: Record<string, TypeDecl> = {
   keys: { access: 'person', key: ['version'], fields: { version: 'number', wrapped: 'text' } },
   settings: { access: 'shared', key: ['name'], fields: { name: 'text', value: 'json' } },
   invitations: { access: 'system', key: ['id'], fields: { id: 'id', code: 'text', email: 'text', redeemed_at: 'time' }, query: ['code', 'redeemed_at'] },
+  events: {
+    access: 'system',
+    key: ['id'],
+    fields: { id: 'id', viewer: 'text', sid: 'text', t: 'time', a: 'text', tab: 'text', e: 'json' },
+    query: ['viewer', 'sid', 't', 'a', 'tab'],
+    paths: { name: { from: 'e', path: ['name'], kind: 'text' }, dur: { from: 'e', path: ['dur'], kind: 'number' }, test: { from: 'e', path: ['test'], kind: 'boolean' } },
+  },
+  viewers: { access: 'system', key: ['viewer'], fields: { viewer: 'text', first_seen: 'time', last_seen: 'time', os: 'text' } },
 };
 const system: Record<string, SystemDecl> = {
   invite: { write: ['invitations'] },
+  analytics: { write: ['events', 'viewers'] },
   owner_report: { read: ['docs', 'settings'] },
   set_signup: { write: ['settings'] },
 };
@@ -235,6 +244,52 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.equal(await sys('invite')((w) => w.count('invitations', { where: { code: 'ZZZZ-ZZZZ-ZZZZ' } })), 0);
     });
 
+    test('summaries: groups (fields, JSON paths, a local day), counts, distinct and conditional counts, sums, percentiles, order and limit', async () => {
+      const ev = (viewer: string, sid: string, t: string, a: string, tab: string | null, e: Row) => sys('analytics')((w) => w.put('events', { id: uuidv7(), viewer, sid, t, a, tab, e }));
+      // Two viewers over two New York days (the 03:30Z event is still the 19th there).
+      await ev('v1', 's1', '2026-11-19T15:00:00.000Z', 'view', 'today', {});
+      await ev('v1', 's1', '2026-11-19T15:01:00.000Z', 'dwell', 'today', { dur: 1000 });
+      await ev('v1', 's1', '2026-11-19T15:02:00.000Z', 'dwell', 'today', { dur: 3000 });
+      await ev('v2', 's2', '2026-11-20T03:30:00.000Z', 'dwell', 'plan', { dur: 'not a number' });
+      await ev('v2', 's2', '2026-11-20T15:00:00.000Z', 'unplanned', null, { name: 'swim' });
+      await ev('v2', 's3', '2026-11-20T16:00:00.000Z', 'unplanned', null, { name: 'swim' });
+      await ev('v2', 's3', '2026-11-20T16:01:00.000Z', 'error', 'plan', { test: true });
+      const live = { test: { ne: true } };
+      const [totals] = await sys('analytics')((w) => w.summarize('events', { where: live, measures: { viewers: { distinct: 'viewer' }, sessions: { distinct: 'sid' }, events: { count: true }, errors: { count: true, where: { a: 'error' } } } }));
+      assert.deepEqual(totals, { viewers: 2, sessions: 3, events: 6, errors: 0 }, 'the test event is left out; a missing flag is not true');
+      const daily = await sys('analytics')((w) => w.summarize('events', { by: [{ day: 't', zone: 'America/New_York', as: 'day' }], measures: { events: { count: true } }, order: 'day' }));
+      assert.deepEqual(daily, [{ day: '2026-11-19', events: 4 }, { day: '2026-11-20', events: 3 }]);
+      const dwell = await sys('analytics')((w) => w.summarize('events', { where: { a: 'dwell' }, by: ['tab'], measures: { ms: { sum: 'dur' }, visits: { count: true }, p50: { percentile: 'dur', p: 0.5 }, p75: { percentile: 'dur', p: 0.75 } }, order: '-visits' }));
+      assert.deepEqual(dwell, [{ tab: 'today', ms: 4000, visits: 2, p50: 2000, p75: 2500 }, { tab: 'plan', ms: null, visits: 1, p50: null, p75: null }]);
+      const named = await sys('analytics')((w) => w.summarize('events', { where: { a: { nin: ['view', 'dwell', 'error'] } }, by: ['name'], measures: { n: { count: true }, first: { min: 't' } }, order: '-n', limit: 1 }));
+      assert.deepEqual(named, [{ name: 'swim', n: 2, first: '2026-11-20T15:00:00.000Z' }]);
+      assert.equal((await sys('analytics')((w) => w.find('events', { where: { name: 'swim' } }))).rows.length, 2, 'a path is a query field');
+      await code(sys('analytics')((w) => w.summarize('events', { measures: { s: { sum: 'a' } } })), 'not_a_number', 's');
+      await code(sys('analytics')((w) => w.summarize('events', { by: [{ day: 'a', zone: 'UTC' }], measures: { n: { count: true } } })), 'not_a_time', 'a');
+      await code(sys('analytics')((w) => w.summarize('events', { by: [{ day: 't', zone: 'Mars/Olympus' }], measures: { n: { count: true } } })), 'bad_zone');
+      await code(sys('analytics')((w) => w.summarize('events', { measures: { n: { count: true }, m: { distinct: 'e' } } })), 'not_queryable', 'e');
+      await code(as(A)((w) => w.summarize('events', { measures: { n: { count: true } } })), 'system_only', 'events');
+      const log = await r.audit();
+      assert.ok(log.some((x) => x.intent === 'analytics' && x.action === 'summarize'), 'summaries are audited');
+    });
+
+    test('put on a taken key: update, or leave it; a lock holds for the unit', async () => {
+      const first = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', first_seen: '2026-11-01T00:00:00.000Z', last_seen: '2026-11-01T00:00:00.000Z', os: 'ios' }));
+      assert.equal(first!.os, 'ios');
+      const updated = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', last_seen: '2026-11-18T00:00:00.000Z', os: 'android' }, { onConflict: 'update' }));
+      assert.deepEqual([updated!.first_seen, updated!.last_seen, updated!.os], ['2026-11-01T00:00:00.000Z', '2026-11-18T00:00:00.000Z', 'android'], 'only the given fields change');
+      assert.equal(await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', os: 'x' }, { onConflict: 'nothing' })), null);
+      await code(sys('analytics')((w) => w.put('viewers', { viewer: 'v9', os: 'x' })), 'refused');
+      // Two units after the same lock: the second waits for the first to end.
+      const order: string[] = [];
+      await Promise.all([
+        as(A)(async (w) => { await w.lock('tokens:A'); order.push('a1'); await new Promise((res) => setTimeout(res, 50)); order.push('a2'); }),
+        new Promise((res) => setTimeout(res, 10)).then(() => as(A)(async (w) => { await w.lock('tokens:A'); order.push('b'); })),
+      ]);
+      assert.deepEqual(order, ['a1', 'a2', 'b']);
+      await code(as(A)((w) => w.lock('')), 'bad_lock');
+    });
+
     test('errors carry a code and a field, never a value', async () => {
       const values = ['private text 1', 'someone-else@example.com'];
       for (const p of [
@@ -288,6 +343,8 @@ create table ${S}.docs (user_id uuid not null default ${S}.current_user_id(), id
 create table ${S}.keys (user_id uuid not null default ${S}.current_user_id(), version integer not null, wrapped text not null, primary key (user_id, version));
 create table ${S}.settings (name text primary key, value jsonb not null);
 create table ${S}.invitations (id uuid primary key, code text not null unique, email text not null, redeemed_at timestamptz);
+create table ${S}.events (id uuid primary key, viewer text, sid text, t timestamptz, a text, tab text, e jsonb);
+create table ${S}.viewers (viewer text primary key, first_seen timestamptz, last_seen timestamptz, os text);
 create table ${S}.engine_audit (id bigint generated always as identity primary key, at timestamptz not null default now(), intent text not null,
   by_person uuid, type text not null, action text not null, rows integer not null);
 grant usage on schema ${S} to se2_int_api, se2_int_sys;
@@ -301,7 +358,7 @@ create policy system on ${S}.${t} for all to se2_int_sys using (true) with check
 alter table ${S}.settings enable row level security; alter table ${S}.settings force row level security;
 create policy read on ${S}.settings for select to se2_int_api using (true);
 create policy system on ${S}.settings for all to se2_int_sys using (true) with check (true);
-revoke all on ${S}.invitations, ${S}.engine_audit from se2_int_api;
+revoke all on ${S}.invitations, ${S}.events, ${S}.viewers, ${S}.engine_audit from se2_int_api;
 `;
 
 let admin: ReturnType<typeof pg> | undefined;

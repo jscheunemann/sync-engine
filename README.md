@@ -109,6 +109,9 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 - `person` types are each person's; `shared` types are read by anyone and written by system intents; `system` types
   only by system intents. A system intent touches only the types it declares, and each intent it runs is written to
   `<schema>.engine_audit` (no values).
+- `w.summarize(type, { where, by, measures, order, limit })`: groups (fields, JSON `paths`, or `{ day, zone }`) with
+  `count`, `distinct`, `sum`, `avg`, `min`, `max` and `percentile`, each with its own `where` if wanted (ADR 0016).
+- `w.put(type, row, { onConflict: 'update' | 'nothing' })` for insert-or-update; `w.lock(name)` for the rest of the unit.
 - Refusals are `EngineError`s: a code and a field, never a value.
 
 ## Using it
