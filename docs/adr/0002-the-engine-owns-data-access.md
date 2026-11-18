@@ -35,6 +35,7 @@ The test the owner set: **Postgres could be replaced by another database at the 
 ## Consequences
 
 - The owner's test becomes a contract test (0005), not a promise.
-- The package outgrows its name; renaming it (say `data-engine`) is left to the owner and changes nothing here.
+- The package outgrows its name. **It keeps its name until v2 is proven in both apps** (the owner, 2026-11-18); a rename
+  is its own later decision and changes nothing here.
 - Each app's server code shrinks to its rules, routes and hooks. Moving them is a large change, done one app at a
   time (0011).

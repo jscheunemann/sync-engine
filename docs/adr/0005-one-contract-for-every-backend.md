@@ -12,8 +12,8 @@
   and 18; Postgres.js 3 and 4).
 - **A second backend proves the design: SQLite** (and through it, Cloudflare D1). It is cheap to run and different
   enough from Postgres (no schemas, no row-level security, other types) to expose any Postgres assumption in the core.
-  It is a test of the boundary, not a supported production target until the owner says so. MariaDB can follow the same
-  way if it is ever wanted.
+  **It is a test of the boundary only, never a production target** (the owner, 2026-11-18); making it one would be a new
+  ADR. MariaDB can follow the same way if it is ever wanted.
 
 ## Consequences
 
