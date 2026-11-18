@@ -1,6 +1,6 @@
 # 0008. Units of work replace shared transactions
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Decision

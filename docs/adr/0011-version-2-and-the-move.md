@@ -1,6 +1,6 @@
 # 0011. Version 2.0.0, and moving the apps one at a time
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Decision

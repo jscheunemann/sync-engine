@@ -1,6 +1,6 @@
 # 0004. Databases and drivers are the engine's plugins
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Decision

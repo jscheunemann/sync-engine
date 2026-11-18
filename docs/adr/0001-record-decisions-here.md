@@ -1,6 +1,6 @@
 # 0001. Record the engine's decisions here
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Origin: Fitness Tracker PR #126 (Postgres.js 3 → 4) failed at `npm install` on the engine's peer dependency, as
   Clearwork #101 had. Reviewing why led the owner to ask for the engine to be redesigned as loosely coupled.

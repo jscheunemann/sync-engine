@@ -1,6 +1,6 @@
 # 0006. Schema and migrations come from the apps' declarations
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Context

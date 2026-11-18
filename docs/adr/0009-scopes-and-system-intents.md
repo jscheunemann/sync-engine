@@ -1,6 +1,6 @@
 # 0009. Every call carries a scope; cross-person access is a named, audited system intent
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Context

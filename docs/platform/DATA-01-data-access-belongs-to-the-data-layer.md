@@ -1,6 +1,6 @@
 # DATA-01. Data access belongs to the data layer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Category: DATA (how systems store and reach their data)
 

@@ -1,6 +1,6 @@
 # 0003. Apps speak in intents, never SQL
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Context

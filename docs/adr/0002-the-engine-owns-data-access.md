@@ -1,6 +1,6 @@
 # 0002. The engine owns data access; apps send settings and intents
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Origin: the owner: "The app should only send what's needed to create a connection and the needed sql intents, not
   the connection itself. Could I swap Postgres with MariaDB at the sync engine without impacting implementing apps?"

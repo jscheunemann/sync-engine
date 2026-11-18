@@ -1,6 +1,6 @@
 # 0005. One contract suite every backend passes; a second backend proves it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Decision

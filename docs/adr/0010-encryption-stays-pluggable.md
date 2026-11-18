@@ -1,6 +1,6 @@
 # 0010. Encryption stays the app's, as hooks the engine calls
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Decision

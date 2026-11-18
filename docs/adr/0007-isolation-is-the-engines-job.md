@@ -1,6 +1,6 @@
 # 0007. Per-person isolation is enforced by the engine
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 
 ## Context

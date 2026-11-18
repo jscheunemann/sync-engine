@@ -19,6 +19,8 @@ The record sync shared by **Clearwork** (github.com/jscheunemann/clearwork) and 
 - Tests run TypeScript directly with Node's type stripping: relative imports use `.ts`, and no enums, namespaces or
   parameter properties.
 - No user data in logs or errors; problems carry a field and a code, never a value.
+- **Decisions are ADRs** in `docs/adr/` (0001), append-only. Version 2 follows 0002–0011: the engine owns all data
+  access; apps send connection settings and intents, never SQL, connections or driver types.
 
 ## Commands
 
