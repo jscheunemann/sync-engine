@@ -10,21 +10,15 @@
 //
 // The rules are version 1's (server.ts) unchanged: the contract tests run the same cases against both.
 
-import { type AuditEntry, type Backend, type Cond, type Connection, isSystem, type Row, RuleError, type Scope, type Unit } from './backend.ts';
+import { type AuditEntry, type Backend, type Cond, type Connection, isSystem, type Row, RuleError, type SchemaPlan, type Scope, type TableLayout, type Unit } from './backend.ts';
 import { conditions, cursor, EngineError, type FindOptions, fits, type Kind, out, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
 import type { ChangesPage, Fields, Op, Problem, ServerRecord } from './protocol.ts';
+import { type FieldDecl, RecordType, type StoredRecord } from './records.ts';
 
-export { RuleError, isSystem, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.ts';
+export { RuleError, isSystem, type SchemaPlan, type TableLayout, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.ts';
 export { EngineError, type FindOptions, type Kind, type Match, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
 
-/** A stored record: the server record plus how its content is stored. */
-export interface StoredRecord extends ServerRecord {
-  /** 0 plain, 1 encrypted at rest by the server, 2 encrypted on the device. */
-  enc: number;
-  key_version: number;
-  /** enc 2 only: the content as the device encrypted it; the content fields are null. */
-  sealed?: string;
-}
+export { type FieldDecl, type StoredRecord } from './records.ts';
 
 /** A page of a find: the rows, and the cursor for the next page (null at the end). */
 export interface Page<R> {
@@ -45,34 +39,63 @@ export interface Reader<T extends string = string> {
 /** The outcome of an update to a declared type. */
 export type UpdateResult = { status: 'applied'; row: Row } | { status: 'conflict'; current: Row } | { status: 'not_found' };
 
-/** An app's records: the rules for each type and how a type maps to its table's columns. */
+/**
+ * An app's records (ADR 0014): each type's fields, declared, and the app's rules for them. How a record is stored is
+ * the engine's: the app never sees a column.
+ */
 export interface RecordStore<T extends string = string> {
-  /** Where the app's tables are (a Postgres schema). */
-  schema: string;
   types: readonly T[];
-  isType(t: unknown): t is T;
-  /** The editable fields of a type. */
-  fieldNames(type: T): readonly string[];
-  /** The fields that hold what people wrote (what encryption covers); stored in the row's `content`. */
-  contentFields(type: T): readonly string[];
-  /** Fields with their defaults, for a new record. */
-  defaults(type: T): Fields;
-  /** Problems with a set of changes alone: unknown and read-only keys. */
-  checkChanges(type: T, changes: Fields): Problem[];
+  /** Each type's fields: a kind, or `{ kind, content: true }` for what people wrote (kept together, encrypted). */
+  fields: Readonly<Record<T, Readonly<Record<string, FieldDecl>>>>;
+  /** Fields with their defaults, for a new record (default: every field null). */
+  defaults?(type: T): Fields;
+  /** Problems with a set of changes alone (default: unknown fields, and values not of their kind). */
+  checkChanges?(type: T, changes: Fields): Problem[];
   /** Values the rules imply (a done time when something is done). Returns a new object. */
-  normalize(type: T, fields: Fields, now: string): Fields;
+  normalize?(type: T, fields: Fields, now: string): Fields;
   /** Every problem with a whole record. With `sealed`, content was checked on the device and can't be read here. */
   validate(type: T, fields: Fields, id: string, opts: { sealed: boolean }): Problem[];
   /** Rules that need other records, checked in the write's unit of work through `read` (no database access of their own). */
   crossChecks?(read: Reader<T>, type: T, id: string, fields: Fields, deleted: boolean): Promise<Problem[]>;
-  /** A row (after `openRow`) as a record. */
-  toRecord(type: T, row: Row): StoredRecord;
-  /** A record's fields as columns, with the content fields gathered in `content`. */
-  toColumns(type: T, fields: Fields): Row & { content: Row };
   /** Whether new records of this type may be written in bulk (default: types without `crossChecks`). */
   bulkSafe?(type: T): boolean;
-  /** Columns of a type's table a find may use, by kind, beyond id, rev, created_at, updated_at and deleted_at. */
-  queryColumns?(type: T): Readonly<Record<string, Kind>>;
+}
+
+/** A store with its mappings made: what the rules below work with. */
+interface Mapped<T extends string> {
+  types: readonly T[];
+  isType(t: unknown): t is T;
+  type(t: T): RecordType;
+  fieldNames(t: T): readonly string[];
+  contentFields(t: T): readonly string[];
+  defaults(t: T): Fields;
+  checkChanges(t: T, changes: Fields): Problem[];
+  normalize(t: T, fields: Fields, now: string): Fields;
+  validate: RecordStore<T>['validate'];
+  crossChecks?: RecordStore<T>['crossChecks'];
+  bulkSafe?: RecordStore<T>['bulkSafe'];
+  toRecord(t: T, row: Row): StoredRecord;
+  toColumns(t: T, fields: Fields): Row & { content: Row };
+}
+
+function mapStore<T extends string>(store: RecordStore<T>): Mapped<T> {
+  const byType = new Map<string, RecordType>(store.types.map((t) => [t, new RecordType(t, store.fields[t] ?? {})]));
+  const rt = (t: T) => byType.get(t)!;
+  return {
+    types: store.types,
+    isType: (t): t is T => typeof t === 'string' && byType.has(t),
+    type: rt,
+    fieldNames: (t) => rt(t).names,
+    contentFields: (t) => rt(t).content,
+    defaults: (t) => ({ ...rt(t).empty(), ...(store.defaults?.(t) ?? {}) }),
+    checkChanges: (t, c) => (store.checkChanges ? store.checkChanges(t, c) : rt(t).check(c)),
+    normalize: (t, f, now) => (store.normalize ? store.normalize(t, f, now) : { ...f }),
+    validate: (t, f, id, o) => store.validate(t, f, id, o),
+    ...(store.crossChecks ? { crossChecks: (r: Reader<T>, t: T, id: string, f: Fields, d: boolean) => store.crossChecks!(r, t, id, f, d) } : {}),
+    ...(store.bulkSafe ? { bulkSafe: (t: T) => store.bulkSafe!(t) } : {}),
+    toRecord: (t, row) => rt(t).toRecord(row),
+    toColumns: (t, f) => rt(t).toColumns(f),
+  };
 }
 
 /**
@@ -146,6 +169,16 @@ export interface Session<T extends string = string> {
 export interface Engine<T extends string, S> {
   readonly store: RecordStore<T>;
   connect(settings: S): Session<T>;
+  /**
+   * The tables the declarations need, against the database (ADR 0006): steps to read, and conflicts only a person can
+   * settle. Changes nothing. Settings for a database user that may change the schema.
+   */
+  plan(settings: S): Promise<SchemaPlan>;
+  /**
+   * Applies a plan the owner read: refused if the database has moved since (the plan isn't what it would be now) or if
+   * it has conflicts. All its steps or none.
+   */
+  migrate(settings: S, plan: SchemaPlan): Promise<void>;
 }
 
 /** How many rows one bulk write takes. */
@@ -160,7 +193,8 @@ export function createEngine<T extends string, S>(opts: {
   /** System intents, by name (ADR 0009). */
   system?: Readonly<Record<string, SystemDecl>>;
 }): Engine<T, S> {
-  const { store, backend } = opts;
+  const { backend } = opts;
+  const store = mapStore(opts.store);
   const types = opts.types ?? {};
   const system = opts.system ?? {};
   for (const name of Object.keys(types)) if ((store.types as readonly string[]).includes(name)) throw new EngineError('type_declared_twice', name);
@@ -168,10 +202,35 @@ export function createEngine<T extends string, S>(opts: {
     for (const t of [...(d.read ?? []), ...(d.write ?? [])]) if (!types[t] && !store.isType(t)) throw new EngineError('unknown_type', `${name}.${t}`);
   checkTypes(types);
   const tables = Object.entries(types).map(([name, d]) => d.table ?? name);
+  // Every table's columns by kind, for the backend to write each value as its kind and, in part 4b, to make the tables.
+  const columns: Record<string, TableLayout> = {};
+  for (const t of store.types) columns[t] = { kinds: { user_id: 'id', ...store.type(t).columns }, key: ['user_id', 'id'], access: 'record', person: 'user_id' };
+  for (const [name, d] of Object.entries(types)) {
+    const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
+    columns[d.table ?? name] = {
+      kinds: { ...(person ? { [person]: 'id' as Kind } : {}), ...d.fields },
+      key: [...(person ? [person] : []), ...d.key],
+      access: d.access,
+      ...(person ? { person } : {}),
+      query: (d.query ?? []).filter((f) => !d.key.includes(f)),
+    };
+  }
+  const layout = { types: store.types, tables, columns };
+  const schema = () => {
+    if (!backend.schema) throw new EngineError('no_schema_support', backend.kind);
+    return backend.schema;
+  };
   return {
-    store,
+    store: opts.store,
+    plan: (settings) => schema().plan(settings, layout),
+    async migrate(settings, given) {
+      const now = await schema().plan(settings, layout);
+      if (now.conflicts.length) throw new EngineError('schema_conflicts');
+      if (JSON.stringify(now.steps) !== JSON.stringify(given.steps)) throw new EngineError('plan_out_of_date');
+      if (now.steps.length) await schema().apply(settings, now);
+    },
     connect(settings: S): Session<T> {
-      const conn: Connection = backend.connect(settings, { schema: store.schema, types: store.types, tables });
+      const conn: Connection = backend.connect(settings, layout);
       return {
         work: (scope, fn, o) => {
           if (isSystem(scope)) {
@@ -200,10 +259,14 @@ const createdAtOk = (createdAt: string, now: string) => {
   return !(t < Date.parse('2000-01-01T00:00:00Z') || t > Date.parse(now) + 86_400_000);
 };
 
+/** The fields of a stored record, without the sync columns (inside the engine, from a mapped store). */
+const fieldsOf = <T extends string>(store: Mapped<T>, type: T, rec: ServerRecord): Fields =>
+  Object.fromEntries(store.fieldNames(type).map((n) => [n, rec[n] ?? null]));
+
 /** The fields of a stored record, without the sync columns. */
 export function fieldsFrom<T extends string>(store: RecordStore<T>, type: T, rec: ServerRecord): Fields {
   const out: Fields = {};
-  for (const name of store.fieldNames(type)) out[name] = rec[name] ?? null;
+  for (const name of Object.keys(store.fields[type] ?? {})) out[name] = rec[name] ?? null;
   return out;
 }
 
@@ -220,7 +283,6 @@ interface Shape {
   decl?: TypeDecl;
 }
 
-const RECORD_COLUMNS: Readonly<Record<string, Kind>> = { id: 'id', rev: 'number', created_at: 'time', updated_at: 'time', deleted_at: 'time' };
 const FIND_LIMIT = 100;
 /** The engine's own tables in an app's schema: never an app's declared type. */
 const ENGINE_TABLES = ['counters', 'applied_ops', 'prefs', 'engine_audit'];
@@ -241,14 +303,14 @@ function checkTypes(types: Readonly<Record<string, TypeDecl>>): void {
 
 /** The rules, on one unit. */
 class Core<T extends string> {
-  private readonly store: RecordStore<T>;
+  private readonly store: Mapped<T>;
   private readonly types: Readonly<Record<string, TypeDecl>>;
   private readonly crypto: ContentCrypto;
   private readonly u: Unit;
   /** The scope's person, or null in a system unit. */
   private readonly person: string | null;
   private readonly intent: { name: string; by: string | null; decl: SystemDecl } | null;
-  constructor(store: RecordStore<T>, types: Readonly<Record<string, TypeDecl>>, system: Readonly<Record<string, SystemDecl>>, scope: Scope, crypto: ContentCrypto, u: Unit) {
+  constructor(store: Mapped<T>, types: Readonly<Record<string, TypeDecl>>, system: Readonly<Record<string, SystemDecl>>, scope: Scope, crypto: ContentCrypto, u: Unit) {
     this.store = store;
     this.types = types;
     this.crypto = crypto;
@@ -273,7 +335,7 @@ class Core<T extends string> {
 
   private shape(type: string): Shape {
     if (this.store.isType(type)) {
-      const fields: Record<string, Kind> = { ...RECORD_COLUMNS, ...(this.store.queryColumns?.(type) ?? {}) };
+      const fields = this.store.type(type).queryable;
       const queryable = new Map(Object.entries(fields).map(([n, k]) => [n, { col: n, kind: k }]));
       return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable };
     }
@@ -539,7 +601,7 @@ class Core<T extends string> {
       deletedAt = op.delete === true ? now : null;
     } else {
       if (op.base_version === null || op.base_version !== current.version) return { op_id: op.op_id, status: 'conflict', type: op.type, id: op.id, current };
-      fields = { ...fieldsFrom(store, op.type, current), ...changes };
+      fields = { ...fieldsOf(store, op.type, current), ...changes };
       deletedAt = op.delete === true ? (current.deleted_at ?? now) : op.delete === false ? null : current.deleted_at;
     }
     fields = store.normalize(op.type, fields, now);
@@ -724,7 +786,7 @@ class Core<T extends string> {
               if (Number(row.version) !== p.op.base_version) { results[p.i] = { op_id: p.op.op_id, status: 'conflict', type, id: p.op.id, current: store.toRecord(type, await crypto.openRow(type, row)) }; continue; }
               if (row.deleted_at) { slow.add(p.i); continue; }
               const rec = store.toRecord(type, await crypto.openRow(type, row));
-              const fields = store.normalize(type, fieldsFrom(store, type, rec), now);
+              const fields = store.normalize(type, fieldsOf(store, type, rec), now);
               const problems = store.validate(type, fields, p.op.id, { sealed: Number(row.enc) === 2 });
               if (problems.length) { results[p.i] = invalid(p.op, problems); continue; }
               go.push(p);

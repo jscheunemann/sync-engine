@@ -23,3 +23,4 @@ connection to the layer that owns all of an app's data access.
 | [0011](0011-version-2-and-the-move.md) | Version 2.0.0, and moving the apps one at a time | Accepted |
 | [0012](0012-declared-types-and-their-intents.md) | Declared types: find on declared fields, versioned updates, and the audit table | Accepted |
 | [0013](0013-one-backend-for-both-driver-majors.md) | One Postgres backend for driver majors 3 and 4; the pin moves at 2.0.0 | Accepted |
+| [0014](0014-records-and-tables-from-declarations.md) | Records and tables from declarations: no app code sees a column | Accepted |

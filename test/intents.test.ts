@@ -14,19 +14,11 @@ import { memoryBackend, type Memory } from './memory-backend.ts';
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'notes';
 
-/** No record types are used here; the engine needs a store all the same. */
-const store = (schema: string): RecordStore<T> => ({
-  schema,
+/** Records, declared: found here by their columns (the rest of their contract is test/contract.test.ts). */
+const store = (): RecordStore<T> => ({
   types: ['notes'],
-  isType: (t): t is T => t === 'notes',
-  fieldNames: () => [],
-  contentFields: () => [],
-  defaults: () => ({}),
-  checkChanges: () => [],
-  normalize: (_t, f) => f,
+  fields: { notes: { title: 'text', tags: 'ids', due: 'json', body: { kind: 'json', content: true } } },
   validate: () => [],
-  toColumns: () => ({ content: {} }),
-  toRecord: (_t, r) => r as never,
 });
 
 const types: Record<string, TypeDecl> = {
@@ -254,7 +246,7 @@ const keys = Object.fromEntries(Object.entries(types).map(([n, d]) => [n, d.acce
 
 contract('in memory', () => {
   const mem: Memory = { tables: new Map(), audit: [], unique: new Map([['invitations', [['code']]]]) };
-  const engine = createEngine({ store: store('mem'), backend: memoryBackend(mem, keys), types, system });
+  const engine = createEngine({ store: store(), backend: memoryBackend(mem, keys), types, system });
   return {
     session: engine.connect({}),
     raw: async (t) => structuredClone(mem.tables.get(t) ?? []),
@@ -263,7 +255,7 @@ contract('in memory', () => {
 });
 
 describe('declarations are checked when the engine is made', () => {
-  const mk = (t: Record<string, TypeDecl>, s: Record<string, SystemDecl> = {}) => () => createEngine({ store: store('x'), backend: postgres, types: t, system: s });
+  const mk = (t: Record<string, TypeDecl>, s: Record<string, SystemDecl> = {}) => () => createEngine({ store: store(), backend: postgres, types: t, system: s });
   const is = (c: string) => (e: unknown) => e instanceof EngineError && e.code === c;
   test('fields, keys, versions, sealing, engine tables and system intents', () => {
     assert.throws(mk({ a: { access: 'person', key: ['id'], fields: {} } }), is('undeclared_field'));
@@ -310,8 +302,8 @@ const S = 'se2_int';
 contract(
   'Postgres, row-level security on',
   () => {
-    const engine = createEngine({ store: store(S), backend: postgres, types, system });
-    pgSession = engine.connect({ url: URL_!, max: 2, role: 'se2_int_api', systemRole: 'se2_int_sys' });
+    const engine = createEngine({ store: store(), backend: postgres, types, system });
+    pgSession = engine.connect({ url: URL_!, schema: S, max: 2, role: 'se2_int_api', systemRole: 'se2_int_sys' });
     return {
       session: pgSession,
       raw: async (t) => (await admin!.unsafe(`select * from ${S}.${t}`)) as unknown as Row[],

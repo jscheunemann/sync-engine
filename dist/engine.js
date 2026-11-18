@@ -11,8 +11,29 @@
 // The rules are version 1's (server.ts) unchanged: the contract tests run the same cases against both.
 import { isSystem, RuleError } from "./backend.js";
 import { conditions, cursor, EngineError, fits, out } from "./declare.js";
+import { RecordType } from "./records.js";
 export { RuleError, isSystem } from "./backend.js";
 export { EngineError } from "./declare.js";
+export {} from "./records.js";
+function mapStore(store) {
+    const byType = new Map(store.types.map((t) => [t, new RecordType(t, store.fields[t] ?? {})]));
+    const rt = (t) => byType.get(t);
+    return {
+        types: store.types,
+        isType: (t) => typeof t === 'string' && byType.has(t),
+        type: rt,
+        fieldNames: (t) => rt(t).names,
+        contentFields: (t) => rt(t).content,
+        defaults: (t) => ({ ...rt(t).empty(), ...(store.defaults?.(t) ?? {}) }),
+        checkChanges: (t, c) => (store.checkChanges ? store.checkChanges(t, c) : rt(t).check(c)),
+        normalize: (t, f, now) => (store.normalize ? store.normalize(t, f, now) : { ...f }),
+        validate: (t, f, id, o) => store.validate(t, f, id, o),
+        ...(store.crossChecks ? { crossChecks: (r, t, id, f, d) => store.crossChecks(r, t, id, f, d) } : {}),
+        ...(store.bulkSafe ? { bulkSafe: (t) => store.bulkSafe(t) } : {}),
+        toRecord: (t, row) => rt(t).toRecord(row),
+        toColumns: (t, f) => rt(t).toColumns(f),
+    };
+}
 export const plain = {
     vaultEnabled: async () => false,
     openRow: async (_type, row) => row,
@@ -31,7 +52,8 @@ export class CursorExpired extends Error {
 export const BULK_ROWS = 500;
 /** The engine for an app's records on a backend. Make it once; connect per request. */
 export function createEngine(opts) {
-    const { store, backend } = opts;
+    const { backend } = opts;
+    const store = mapStore(opts.store);
     const types = opts.types ?? {};
     const system = opts.system ?? {};
     for (const name of Object.keys(types))
@@ -43,10 +65,40 @@ export function createEngine(opts) {
                 throw new EngineError('unknown_type', `${name}.${t}`);
     checkTypes(types);
     const tables = Object.entries(types).map(([name, d]) => d.table ?? name);
+    // Every table's columns by kind, for the backend to write each value as its kind and, in part 4b, to make the tables.
+    const columns = {};
+    for (const t of store.types)
+        columns[t] = { kinds: { user_id: 'id', ...store.type(t).columns }, key: ['user_id', 'id'], access: 'record', person: 'user_id' };
+    for (const [name, d] of Object.entries(types)) {
+        const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
+        columns[d.table ?? name] = {
+            kinds: { ...(person ? { [person]: 'id' } : {}), ...d.fields },
+            key: [...(person ? [person] : []), ...d.key],
+            access: d.access,
+            ...(person ? { person } : {}),
+            query: (d.query ?? []).filter((f) => !d.key.includes(f)),
+        };
+    }
+    const layout = { types: store.types, tables, columns };
+    const schema = () => {
+        if (!backend.schema)
+            throw new EngineError('no_schema_support', backend.kind);
+        return backend.schema;
+    };
     return {
-        store,
+        store: opts.store,
+        plan: (settings) => schema().plan(settings, layout),
+        async migrate(settings, given) {
+            const now = await schema().plan(settings, layout);
+            if (now.conflicts.length)
+                throw new EngineError('schema_conflicts');
+            if (JSON.stringify(now.steps) !== JSON.stringify(given.steps))
+                throw new EngineError('plan_out_of_date');
+            if (now.steps.length)
+                await schema().apply(settings, now);
+        },
         connect(settings) {
-            const conn = backend.connect(settings, { schema: store.schema, types: store.types, tables });
+            const conn = backend.connect(settings, layout);
             return {
                 work: (scope, fn, o) => {
                     if (isSystem(scope)) {
@@ -75,14 +127,15 @@ const createdAtOk = (createdAt, now) => {
     const t = Date.parse(createdAt);
     return !(t < Date.parse('2000-01-01T00:00:00Z') || t > Date.parse(now) + 86_400_000);
 };
+/** The fields of a stored record, without the sync columns (inside the engine, from a mapped store). */
+const fieldsOf = (store, type, rec) => Object.fromEntries(store.fieldNames(type).map((n) => [n, rec[n] ?? null]));
 /** The fields of a stored record, without the sync columns. */
 export function fieldsFrom(store, type, rec) {
     const out = {};
-    for (const name of store.fieldNames(type))
+    for (const name of Object.keys(store.fields[type] ?? {}))
         out[name] = rec[name] ?? null;
     return out;
 }
-const RECORD_COLUMNS = { id: 'id', rev: 'number', created_at: 'time', updated_at: 'time', deleted_at: 'time' };
 const FIND_LIMIT = 100;
 /** The engine's own tables in an app's schema: never an app's declared type. */
 const ENGINE_TABLES = ['counters', 'applied_ops', 'prefs', 'engine_audit'];
@@ -140,7 +193,7 @@ class Core {
     }
     shape(type) {
         if (this.store.isType(type)) {
-            const fields = { ...RECORD_COLUMNS, ...(this.store.queryColumns?.(type) ?? {}) };
+            const fields = this.store.type(type).queryable;
             const queryable = new Map(Object.entries(fields).map(([n, k]) => [n, { col: n, kind: k }]));
             return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable };
         }
@@ -437,7 +490,7 @@ class Core {
         else {
             if (op.base_version === null || op.base_version !== current.version)
                 return { op_id: op.op_id, status: 'conflict', type: op.type, id: op.id, current };
-            fields = { ...fieldsFrom(store, op.type, current), ...changes };
+            fields = { ...fieldsOf(store, op.type, current), ...changes };
             deletedAt = op.delete === true ? (current.deleted_at ?? now) : op.delete === false ? null : current.deleted_at;
         }
         fields = store.normalize(op.type, fields, now);
@@ -665,7 +718,7 @@ class Core {
                                 continue;
                             }
                             const rec = store.toRecord(type, await crypto.openRow(type, row));
-                            const fields = store.normalize(type, fieldsFrom(store, type, rec), now);
+                            const fields = store.normalize(type, fieldsOf(store, type, rec), now);
                             const problems = store.validate(type, fields, p.op.id, { sealed: Number(row.enc) === 2 });
                             if (problems.length) {
                                 results[p.i] = invalid(p.op, problems);

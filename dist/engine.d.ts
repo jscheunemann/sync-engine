@@ -1,16 +1,10 @@
-import { type Backend, type Row, type Scope } from './backend.js';
-import { type FindOptions, type Kind, type SystemDecl, type TypeDecl, type Where } from './declare.js';
+import { type Backend, type Row, type SchemaPlan, type Scope } from './backend.js';
+import { type FindOptions, type SystemDecl, type TypeDecl, type Where } from './declare.js';
 import type { ChangesPage, Fields, Op, Problem, ServerRecord } from './protocol.js';
-export { RuleError, isSystem, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.js';
+import { type FieldDecl, type StoredRecord } from './records.js';
+export { RuleError, isSystem, type SchemaPlan, type TableLayout, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.js';
 export { EngineError, type FindOptions, type Kind, type Match, type SystemDecl, type TypeDecl, type Where } from './declare.js';
-/** A stored record: the server record plus how its content is stored. */
-export interface StoredRecord extends ServerRecord {
-    /** 0 plain, 1 encrypted at rest by the server, 2 encrypted on the device. */
-    enc: number;
-    key_version: number;
-    /** enc 2 only: the content as the device encrypted it; the content fields are null. */
-    sealed?: string;
-}
+export { type FieldDecl, type StoredRecord } from './records.js';
 /** A page of a find: the rows, and the cursor for the next page (null at the end). */
 export interface Page<R> {
     rows: R[];
@@ -37,38 +31,28 @@ export type UpdateResult = {
 } | {
     status: 'not_found';
 };
-/** An app's records: the rules for each type and how a type maps to its table's columns. */
+/**
+ * An app's records (ADR 0014): each type's fields, declared, and the app's rules for them. How a record is stored is
+ * the engine's: the app never sees a column.
+ */
 export interface RecordStore<T extends string = string> {
-    /** Where the app's tables are (a Postgres schema). */
-    schema: string;
     types: readonly T[];
-    isType(t: unknown): t is T;
-    /** The editable fields of a type. */
-    fieldNames(type: T): readonly string[];
-    /** The fields that hold what people wrote (what encryption covers); stored in the row's `content`. */
-    contentFields(type: T): readonly string[];
-    /** Fields with their defaults, for a new record. */
-    defaults(type: T): Fields;
-    /** Problems with a set of changes alone: unknown and read-only keys. */
-    checkChanges(type: T, changes: Fields): Problem[];
+    /** Each type's fields: a kind, or `{ kind, content: true }` for what people wrote (kept together, encrypted). */
+    fields: Readonly<Record<T, Readonly<Record<string, FieldDecl>>>>;
+    /** Fields with their defaults, for a new record (default: every field null). */
+    defaults?(type: T): Fields;
+    /** Problems with a set of changes alone (default: unknown fields, and values not of their kind). */
+    checkChanges?(type: T, changes: Fields): Problem[];
     /** Values the rules imply (a done time when something is done). Returns a new object. */
-    normalize(type: T, fields: Fields, now: string): Fields;
+    normalize?(type: T, fields: Fields, now: string): Fields;
     /** Every problem with a whole record. With `sealed`, content was checked on the device and can't be read here. */
     validate(type: T, fields: Fields, id: string, opts: {
         sealed: boolean;
     }): Problem[];
     /** Rules that need other records, checked in the write's unit of work through `read` (no database access of their own). */
     crossChecks?(read: Reader<T>, type: T, id: string, fields: Fields, deleted: boolean): Promise<Problem[]>;
-    /** A row (after `openRow`) as a record. */
-    toRecord(type: T, row: Row): StoredRecord;
-    /** A record's fields as columns, with the content fields gathered in `content`. */
-    toColumns(type: T, fields: Fields): Row & {
-        content: Row;
-    };
     /** Whether new records of this type may be written in bulk (default: types without `crossChecks`). */
     bulkSafe?(type: T): boolean;
-    /** Columns of a type's table a find may use, by kind, beyond id, rev, created_at, updated_at and deleted_at. */
-    queryColumns?(type: T): Readonly<Record<string, Kind>>;
 }
 /**
  * Encryption of what people wrote, when an app has it (ADR 0010). Without it (`plain`), content is stored as it comes
@@ -162,6 +146,16 @@ export interface Session<T extends string = string> {
 export interface Engine<T extends string, S> {
     readonly store: RecordStore<T>;
     connect(settings: S): Session<T>;
+    /**
+     * The tables the declarations need, against the database (ADR 0006): steps to read, and conflicts only a person can
+     * settle. Changes nothing. Settings for a database user that may change the schema.
+     */
+    plan(settings: S): Promise<SchemaPlan>;
+    /**
+     * Applies a plan the owner read: refused if the database has moved since (the plan isn't what it would be now) or if
+     * it has conflicts. All its steps or none.
+     */
+    migrate(settings: S, plan: SchemaPlan): Promise<void>;
 }
 /** How many rows one bulk write takes. */
 export declare const BULK_ROWS = 500;

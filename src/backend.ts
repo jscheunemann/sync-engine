@@ -5,6 +5,8 @@
 // Every call happens inside a unit (one transaction) opened for one scope, and a backend must keep it to that scope's
 // person on every read and write (ADR 0007): the core never asks for "all rows".
 
+import type { Kind } from './declare.ts';
+
 /** A stored row: the sync columns, the type's own columns, and `content` (an object). */
 export type Row = Record<string, unknown>;
 
@@ -26,14 +28,29 @@ export type Scope = PersonScope | SystemScope;
 
 export const isSystem = (s: Scope): s is SystemScope => typeof (s as SystemScope).system === 'string';
 
-/** How an app's data is laid out: today's tables, adopted as they are (ADR 0006). */
+/**
+ * How an app's data is laid out, from its declarations (ADR 0014): each table, its columns by kind, and its key. Where
+ * the tables are (a Postgres schema, say) is the backend's setting, not the app's.
+ */
 export interface Layout {
-  /** Every table the app declared beyond the record types (server and shared types), so a backend refuses others. */
-  readonly tables?: readonly string[];
-  /** Where the record tables, the change counter, the op log and prefs live (a Postgres schema). */
-  readonly schema: string;
   /** The record types, one table each. */
   readonly types: readonly string[];
+  /** Every table the app declared beyond the record types (server and shared types), so a backend refuses others. */
+  readonly tables?: readonly string[];
+  /** Each table, from the declarations: its columns by kind, key, who its rows belong to, and its query fields. */
+  readonly columns?: Readonly<Record<string, TableLayout>>;
+}
+
+/** One table, as the backend needs it to write values by kind and to make or adopt the table (ADR 0014). */
+export interface TableLayout {
+  readonly kinds: Readonly<Record<string, Kind>>;
+  readonly key: readonly string[];
+  /** `record` (synced from devices), or a declared type's access. */
+  readonly access: 'record' | 'person' | 'shared' | 'system';
+  /** The column naming a row's person, for record and person tables. */
+  readonly person?: string;
+  /** Columns a find filters and orders by (indexed). */
+  readonly query?: readonly string[];
 }
 
 /** A database rule refused a write (a check, a unique key, a reference). The core decides what that means for the op. */
@@ -142,8 +159,21 @@ export interface Connection {
   close(): Promise<void>;
 }
 
+/** What making or adopting an app's tables takes (ADR 0006): steps to read before they run, and what only a person can settle. */
+export interface SchemaPlan {
+  /** Additive steps, in order: each a line for the owner and the backend's statement. */
+  readonly steps: readonly { readonly summary: string; readonly sql: string }[];
+  /** Differences the engine leaves alone (a column of another type): a code each, never a value. */
+  readonly conflicts: readonly { readonly table: string; readonly column?: string; readonly issue: string; readonly want?: string; readonly have?: string }[];
+}
+
 /** A database the engine can run on (ADR 0004). `S` is its connection settings. */
 export interface Backend<S> {
   readonly kind: string;
   connect(settings: S, layout: Layout): Connection;
+  /** The tables an app's layout needs, against what the database has; and applying such a plan. */
+  readonly schema?: {
+    plan(settings: S, layout: Layout): Promise<SchemaPlan>;
+    apply(settings: S, plan: SchemaPlan): Promise<void>;
+  };
 }

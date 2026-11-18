@@ -14,26 +14,13 @@ import { checkOp, type Fields, type Op, type Transport } from '../src/protocol.t
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'notes';
 
-const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOString());
-const storeIn = (schema: string): RecordStore<T> => ({
-  schema,
+const storeIn = (): RecordStore<T> => ({
   types: ['notes'],
-  isType: (t): t is T => t === 'notes',
-  fieldNames: () => ['title', 'body', 'pinned'],
-  contentFields: () => ['body'],
+  fields: { notes: { title: 'text', body: { kind: 'text', content: true }, pinned: 'boolean' } },
   defaults: () => ({ title: null, body: null, pinned: false }),
   checkChanges: (_t, changes) => Object.keys(changes).filter((k) => !['title', 'body', 'pinned'].includes(k)).map((field) => ({ field, code: 'unknown' })),
   normalize: (_t, f) => ({ ...f, title: typeof f.title === 'string' ? f.title.trim() : f.title }),
   validate: (_t, f) => (typeof f.title === 'string' && f.title ? [] : [{ field: 'title', code: 'required' }]),
-  toColumns: (_t, f) => ({ title: f.title, pinned: f.pinned, content: f.body == null ? {} : { body: f.body } }),
-  toRecord: (_t, row: Row): StoredRecord => {
-    const content = (row.content ?? {}) as Row;
-    return {
-      id: String(row.id), version: Number(row.version), rev: Number(row.rev), created_at: iso(row.created_at)!, updated_at: iso(row.updated_at)!,
-      client_updated_at: iso(row.client_updated_at), deleted_at: iso(row.deleted_at), enc: Number(row.enc ?? 0), key_version: Number(row.key_version ?? 0),
-      title: row.title ?? null, body: content.body ?? null, pinned: row.pinned ?? false,
-    };
-  },
 });
 
 /** Today's tables (README.md), as an app has them; `rls` adds row-level security and the API role. */
@@ -111,8 +98,8 @@ describe('contract: Postgres, through the engine, row-level security on', { skip
     admin = pg(URL_!, { max: 2, onnotice: () => {} });
     await admin.unsafe(`do $$ begin if exists (select from pg_roles where rolname = 'se2_api') then execute 'drop owned by se2_api'; drop role se2_api; end if; end $$;`).catch(() => {});
     await admin.unsafe(`create role se2_api nologin;` + ddl(S, true));
-    const engine = createEngine({ store: storeIn(S), backend: postgres });
-    session = engine.connect({ url: URL_!, max: 2, role: 'se2_api' } satisfies PostgresSettings);
+    const engine = createEngine({ store: storeIn(), backend: postgres });
+    session = engine.connect({ url: URL_!, schema: S, max: 2, role: 'se2_api' } satisfies PostgresSettings);
     h = harness(session);
   });
   after(async () => {
@@ -292,7 +279,7 @@ describe('contract: Postgres, through the engine, row-level security on', { skip
     const P = uuidv7();
     const dev = () => ({ recs: new Map() as Recs<T>, prefs: {} as Fields, state: emptyState<T>() as SyncState<T> });
     const run = async (d: ReturnType<typeof dev>, at: string) => {
-      const r = await sync<T>({ ...d, transport: h.transport(P), fieldsOf: storeIn(S).fieldNames, now: () => at });
+      const r = await sync<T>({ ...d, transport: h.transport(P), fieldsOf: () => ['title', 'body', 'pinned'], now: () => at });
       assert.equal(r.error, null);
       Object.assign(d, { recs: r.recs, prefs: r.prefs, state: r.state });
     };
@@ -328,7 +315,7 @@ describe('contract: isolation by the engine alone (row-level security off)', { s
   before(async () => {
     admin = pg(URL_!, { max: 2, onnotice: () => {} });
     await admin.unsafe(ddl(S, false));
-    session = createEngine({ store: storeIn(S), backend: postgres }).connect({ url: URL_!, max: 2 });
+    session = createEngine({ store: storeIn(), backend: postgres }).connect({ url: URL_!, schema: S, max: 2 });
     h = harness(session);
   });
   after(async () => {
@@ -363,5 +350,60 @@ describe('contract: isolation by the engine alone (row-level security off)', { s
 
   test('a unit needs a person', async () => {
     assert.throws(() => session.work({ person: '' }, async () => 1), /scope_required/);
+  });
+});
+
+describe('contract: every field kind, stored by the engine from declarations (ADR 0014)', { skip: !URL_ && 'TEST_DATABASE_URL not set' }, () => {
+  const S = 'se2_kinds';
+  type K = 'tasks';
+  let admin: ReturnType<typeof pg>;
+  let session: Session<K>;
+  const P = uuidv7();
+  const store: RecordStore<K> = {
+    types: ['tasks'],
+    fields: { tasks: { title: 'text', size: 'integer', est: 'number', done: 'boolean', due_at: 'time', tags: 'ids', due: 'json', notes: { kind: 'text', content: true } } },
+    validate: () => [],
+  };
+
+  before(async () => {
+    admin = pg(URL_!, { max: 2, onnotice: () => {} });
+    await admin.unsafe(ddl(S, false) + `
+create table ${S}.tasks (
+  user_id uuid not null, id uuid not null, rev bigint not null, version integer not null default 1,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(), client_updated_at timestamptz, deleted_at timestamptz,
+  content jsonb not null default '{}', enc smallint not null default 0, key_version integer not null default 0,
+  title text, size integer, est double precision, done boolean, due_at timestamptz, tags uuid[] not null default '{}', due jsonb,
+  primary key (user_id, id));`);
+    session = createEngine({ store, backend: postgres }).connect({ url: URL_!, schema: S, max: 2 });
+  });
+  after(async () => {
+    await session.close();
+    await admin.unsafe(`drop schema if exists ${S} cascade`);
+    await admin.end();
+  });
+
+  test('each kind is written as its column takes it and comes back as it went in, in one op, in bulk and in the feed', async () => {
+    const tag = uuidv7();
+    const fields = { title: 'Plan', size: 3, est: 0.1 + 0.2, done: true, due_at: '2026-11-20T15:00:00.000Z', tags: [tag, uuidv7()], due: { kind: 'floating', date: '2026-11-20', time: '09:00' }, notes: 'what I wrote' };
+    const op = (f: Fields): Op<K> => ({ op_id: uuidv7(), type: 'tasks', id: uuidv7(), base_version: null, fields: f });
+    const [one] = await session.work({ person: P }, (w) => w.apply([op(fields)]));
+    assert.equal(one!.status, 'applied');
+    const got = (one as { record: StoredRecord }).record;
+    for (const [k, v] of Object.entries(fields)) assert.deepEqual(got[k], v, k);
+    const many = await session.work({ person: P }, (w) => w.apply([op({ ...fields, tags: [] }), op({ title: 'Empty' })]));
+    assert.deepEqual(many.map((r) => r.status), ['applied', 'applied']);
+    assert.deepEqual((many[0] as { record: StoredRecord }).record.tags, []);
+    assert.deepEqual((many[1] as { record: StoredRecord }).record.due, null);
+    assert.deepEqual((many[1] as { record: StoredRecord }).record.tags, [], 'no list is an empty list');
+    const [stored] = await admin.unsafe(`select tags::text as tags, due, content from ${S}.tasks where id = '${got.id}'`);
+    assert.equal(stored!.tags, `{${fields.tags.join(',')}}`, 'a uuid array');
+    assert.deepEqual(stored!.due, fields.due, 'jsonb, as the device sent it');
+    assert.deepEqual(stored!.content, { notes: 'what I wrote' }, 'content apart from the columns');
+    const feed = await session.work({ person: P }, (w) => w.changes(0, 10));
+    const fromFeed = feed.changes.find((c) => c.record.id === got.id)!.record;
+    for (const [k, v] of Object.entries(fields)) assert.deepEqual(fromFeed[k], v, `${k} from the feed`);
+    const found = await session.work({ person: P }, (w) => w.find('tasks', { where: { size: 3, done: true, due_at: { gte: '2026-11-20T00:00:00Z' } } }));
+    assert.deepEqual(found.rows.map((r) => r.id).sort(), [got.id, (many[0] as { record: StoredRecord }).record.id].sort());
+    await assert.rejects(session.work({ person: P }, (w) => w.find('tasks', { where: { tags: [tag] as never } })), /not_queryable/);
   });
 });

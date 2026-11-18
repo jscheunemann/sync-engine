@@ -50,18 +50,31 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 
 Following `docs/adr/` 0002 to 0011, an app gives the engine connection settings and intents; the engine owns the
 driver, the SQL, transactions and per-person isolation. Nothing database-shaped crosses: no SQL, connection or driver
-types. Part 1: the core and the Postgres backend, on today's tables. Part 2 (this): declared types, find and count,
-and system intents with their audit (ADR 0012).
+types. Part 1: the core and the Postgres backend, on today's tables. Part 2: declared types, find and count, and
+system intents with their audit (ADR 0012). Part 3: one backend for Postgres.js 3 and 4 (ADR 0013). Part 4 (this):
+records and tables from declarations (ADR 0014).
 
 ```ts
 import { createEngine } from '@jscheunemann/sync-engine/engine';
 import { postgres } from '@jscheunemann/sync-engine/postgres';
 
 const engine = createEngine({ store, backend: postgres });                       // once
-const session = engine.connect({ url: env.HYPERDRIVE.connectionString });        // per request
+const session = engine.connect({ url: env.HYPERDRIVE.connectionString, schema: 'app' }); // per request
 const results = await session.work({ person }, (w) => w.apply(ops), { crypto }); // a unit of work
 const page = await session.work({ person }, (w) => w.changes(since, 500));
 ctx.waitUntil(session.close());
+```
+
+A record type is declared, not mapped: the engine stores it.
+
+```ts
+const store: RecordStore<'tasks'> = {
+  types: ['tasks'],
+  fields: { tasks: { title: 'text', size: 'integer', due: 'json', tags: 'ids', notes: { kind: 'text', content: true } } },
+  validate: (type, fields, id, { sealed }) => [],   // the app's rules; defaults, checkChanges, normalize, crossChecks optional
+};
+const plan = await engine.plan(adminSettings);    // the steps and any conflicts, to read; changes nothing
+await engine.migrate(adminSettings, plan);        // refused if out of date or conflicted; all steps or none
 ```
 
 - `w.apply(ops)` applies ops with version 1's rules; all new records, or all plain deletes, go in bulk by themselves.

@@ -1,6 +1,8 @@
 // What an app declares beyond its record types (ADRs 0003, 0006, 0009): server and shared types, the fields a find may
 // use, and its system intents. The engine checks every intent against these before a backend sees it, so a backend is
 // only ever asked for declared tables, columns and values of the declared kind.
+/** Kinds a find may filter and order by (not lists or JSON). */
+export const QUERYABLE = ['text', 'number', 'integer', 'boolean', 'time', 'id'];
 /** A refused intent: a code, and the field when there is one; never a value (no user data in errors). */
 export class EngineError extends Error {
     code;
@@ -24,6 +26,10 @@ export function fits(kind, v) {
             return typeof v === 'string' && v.length > 0 && v.length <= 200;
         case 'number':
             return typeof v === 'number' && Number.isFinite(v);
+        case 'integer':
+            return Number.isSafeInteger(v);
+        case 'ids':
+            return Array.isArray(v) && v.length <= 10000 && v.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 200 && !/[{},"\\\s]/.test(x));
         case 'boolean':
             return typeof v === 'boolean';
         case 'time':
@@ -38,11 +44,22 @@ export function out(kind, v) {
         return null;
     if (kind === 'time')
         return new Date(v).toISOString();
-    if (kind === 'number')
+    if (kind === 'number' || kind === 'integer')
         return Number(v);
+    if (kind === 'ids')
+        return idList(v);
     if (kind === 'id')
         return String(v);
     return v;
+}
+/** A list of ids as stored: an array, or Postgres's text form of one (`{a,b}`) where a driver leaves it as text. */
+function idList(v) {
+    if (Array.isArray(v))
+        return v.map(String);
+    const s = String(v);
+    if (s === '{}' || s === '')
+        return [];
+    return s.replace(/^\{|\}$/g, '').split(',').map((x) => x.replace(/^"|"$/g, ''));
 }
 /** Conditions from a where, against the fields that may be queried (name → column and kind). */
 export function conditions(where, fields) {
