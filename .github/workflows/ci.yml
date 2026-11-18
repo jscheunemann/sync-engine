@@ -85,7 +85,15 @@ jobs:
         run: |
           now=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '.state + " " + .headRefOid')
           case "$now" in
-            "OPEN $HEAD_SHA") gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$HEAD_SHA" ;;
+            "OPEN $HEAD_SHA")
+              gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$HEAD_SHA"
+              # Tag the release here: this merge doesn't start the tag workflow (CI's own token), and two releases
+              # merged within its 15 minutes would leave the first untagged.
+              merged=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json mergeCommit --jq .mergeCommit.oid)
+              v="v$(gh api "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$merged" --jq .content | base64 -d | node -p "JSON.parse(require('fs').readFileSync(0)).version")"
+              if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$v" >/dev/null 2>&1; then echo "$v is already tagged"
+              else gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$v" -f sha="$merged" >/dev/null && echo "Tagged $v"; fi
+              ;;
             "MERGED "*) echo "Already merged." ;;
             "OPEN "*) echo "The pull request has a newer commit; its own run merges it." ;;
             *) echo "Not merging: $now" ;;
