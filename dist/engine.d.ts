@@ -1,6 +1,8 @@
 import { type Backend, type Row, type Scope } from './backend.js';
+import { type FindOptions, type Kind, type SystemDecl, type TypeDecl, type Where } from './declare.js';
 import type { ChangesPage, Fields, Op, Problem, ServerRecord } from './protocol.js';
-export { RuleError, type Backend, type Row, type Scope } from './backend.js';
+export { RuleError, isSystem, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.js';
+export { EngineError, type FindOptions, type Kind, type Match, type SystemDecl, type TypeDecl, type Where } from './declare.js';
 /** A stored record: the server record plus how its content is stored. */
 export interface StoredRecord extends ServerRecord {
     /** 0 plain, 1 encrypted at rest by the server, 2 encrypted on the device. */
@@ -9,11 +11,32 @@ export interface StoredRecord extends ServerRecord {
     /** enc 2 only: the content as the device encrypted it; the content fields are null. */
     sealed?: string;
 }
-/** What an app's hooks may read inside a unit of work: records by id, kept to the unit's person. */
+/** A page of a find: the rows, and the cursor for the next page (null at the end). */
+export interface Page<R> {
+    rows: R[];
+    next: string | null;
+}
+/** What may be read inside a unit of work (and what an app's hooks get): kept to the unit's scope. */
 export interface Reader<T extends string = string> {
     get(type: T, id: string): Promise<StoredRecord | null>;
     getMany(type: T, ids: readonly string[]): Promise<StoredRecord[]>;
+    /** Records of a type, or rows of a declared type, by declared fields only (ADR 0003). */
+    find(type: T, opts?: FindOptions): Promise<Page<StoredRecord>>;
+    find(type: string, opts?: FindOptions): Promise<Page<Row>>;
+    count(type: string, opts?: {
+        where?: Where;
+    }): Promise<number>;
 }
+/** The outcome of an update to a declared type. */
+export type UpdateResult = {
+    status: 'applied';
+    row: Row;
+} | {
+    status: 'conflict';
+    current: Row;
+} | {
+    status: 'not_found';
+};
 /** An app's records: the rules for each type and how a type maps to its table's columns. */
 export interface RecordStore<T extends string = string> {
     /** Where the app's tables are (a Postgres schema). */
@@ -44,6 +67,8 @@ export interface RecordStore<T extends string = string> {
     };
     /** Whether new records of this type may be written in bulk (default: types without `crossChecks`). */
     bulkSafe?(type: T): boolean;
+    /** Columns of a type's table a find may use, by kind, beyond id, rev, created_at, updated_at and deleted_at. */
+    queryColumns?(type: T): Readonly<Record<string, Kind>>;
 }
 /**
  * Encryption of what people wrote, when an app has it (ADR 0010). Without it (`plain`), content is stored as it comes
@@ -120,6 +145,12 @@ export interface Work<T extends string = string> extends Reader<T> {
         /** Replaces the prefs if `baseVersion` is current; otherwise returns the current copy to merge with. */
         put(data: Record<string, unknown>, baseVersion: number): Promise<PutPrefsResult>;
     };
+    /** Writes a new row of a declared type; returns it as stored. */
+    put(type: string, row: Row): Promise<Row>;
+    /** Changes the row with this key; with a `version` column, only if `version` is still current. */
+    update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult>;
+    /** Removes the row with this key; returns whether there was one. */
+    remove(type: string, key: Row): Promise<boolean>;
 }
 /** A request's session: one connection, any number of units of work. */
 export interface Session<T extends string = string> {
@@ -138,6 +169,10 @@ export declare const BULK_ROWS = 500;
 export declare function createEngine<T extends string, S>(opts: {
     store: RecordStore<T>;
     backend: Backend<S>;
+    /** Types the app's server writes (not synced from devices), by name (ADR 0003). */
+    types?: Readonly<Record<string, TypeDecl>>;
+    /** System intents, by name (ADR 0009). */
+    system?: Readonly<Record<string, SystemDecl>>;
 }): Engine<T, S>;
 /** The fields of a stored record, without the sync columns. */
 export declare function fieldsFrom<T extends string>(store: RecordStore<T>, type: T, rec: ServerRecord): Fields;

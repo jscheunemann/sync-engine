@@ -21,3 +21,4 @@ connection to the layer that owns all of an app's data access.
 | [0009](0009-scopes-and-system-intents.md) | Every call carries a scope; cross-person access is a named, audited system intent | Accepted |
 | [0010](0010-encryption-stays-pluggable.md) | Encryption stays the app's, as hooks the engine calls | Accepted |
 | [0011](0011-version-2-and-the-move.md) | Version 2.0.0, and moving the apps one at a time | Accepted |
+| [0012](0012-declared-types-and-their-intents.md) | Declared types: find on declared fields, versioned updates, and the audit table | Accepted |

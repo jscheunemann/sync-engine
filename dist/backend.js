@@ -4,6 +4,7 @@
 //
 // Every call happens inside a unit (one transaction) opened for one scope, and a backend must keep it to that scope's
 // person on every read and write (ADR 0007): the core never asks for "all rows".
+export const isSystem = (s) => typeof s.system === 'string';
 /** A database rule refused a write (a check, a unique key, a reference). The core decides what that means for the op. */
 export class RuleError extends Error {
     /** The rule's name, when the database gives one (a constraint name). */
