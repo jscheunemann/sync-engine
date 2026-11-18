@@ -119,7 +119,7 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
   const kindOf = (t: string, name: string): Kind | undefined => pathsOf(t)[name]?.kind ?? kindsOf(t)[name];
   const declared = (t: string) => {
     if (!layout.types.includes(t) && !(layout.tables ?? []).includes(t)) throw new Error('unknown_table');
-    return q(t);
+    return q(layout.columns?.[t]?.table ?? t);
   };
   const own = (): string => {
     if (person === null) throw new Error('person_scope_only');
@@ -330,7 +330,7 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
       const dir = qy.order?.desc ? 'desc' : 'asc';
       const order = [...(qy.order ? [`${ref(qy.table, qy.order.col)} ${dir} nulls last`] : []), ...qy.key.map((k) => `${q(k)} ${dir}`)].join(', ');
       const f = filter(qy);
-      return all(qy.table, `select * from ${t} where ${f.sql} order by ${order}${qy.limit !== undefined ? ` limit ${Number(qy.limit)}` : ''}`, f.params);
+      return all(qy.table, `select * from ${t} where ${f.sql}${order ? ` order by ${order}` : ''}${qy.limit !== undefined ? ` limit ${Number(qy.limit)}` : ''}`, f.params);
     },
     count: async (qy) => {
       const f = filter({ ...qy, after: undefined });
@@ -380,7 +380,8 @@ export const sqlite: Backend<SqliteSettings> = {
       const have = new Set((s.prepare(`select name from sqlite_master where type = 'table'`).all() as { name: string }[]).map((r) => r.name));
       const steps: { summary: string; sql: string }[] = [];
       for (const [name, e] of Object.entries(ENGINE)) if (!have.has(name)) steps.push({ summary: `Create the engine's table ${name}`, sql: `${e.ddl};` });
-      for (const [name, t] of Object.entries(layout.columns ?? {})) {
+      for (const [type, t] of Object.entries(layout.columns ?? {})) {
+        const name = t.table;
         if (have.has(name)) {
           const cols = new Set((s.prepare(`select name from pragma_table_info(?)`).all(name) as { name: string }[]).map((r) => r.name));
           for (const [c, k] of Object.entries(t.kinds))

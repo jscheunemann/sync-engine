@@ -26,3 +26,4 @@ connection to the layer that owns all of an app's data access.
 | [0014](0014-records-and-tables-from-declarations.md) | Records and tables from declarations: no app code sees a column | Accepted |
 | [0015](0015-sqlite-proves-the-contract.md) | SQLite proves the contract, as a test backend only | Accepted |
 | [0016](0016-summaries-paths-upsert-and-locks.md) | Summaries, JSON paths, upsert and locks | Accepted |
+| [0017](0017-types-name-their-tables-the-backend-places-them.md) | Types are addressed by name; the backend places their tables | Accepted |

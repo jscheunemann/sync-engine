@@ -64,14 +64,15 @@ export function createEngine(opts) {
             if (!types[t] && !store.isType(t))
                 throw new EngineError('unknown_type', `${name}.${t}`);
     checkTypes(types);
-    const tables = Object.entries(types).map(([name, d]) => d.table ?? name);
+    const tables = Object.keys(types);
     // Every table's columns by kind, for the backend to write each value as its kind and, in part 4b, to make the tables.
     const columns = {};
     for (const t of store.types)
-        columns[t] = { kinds: { user_id: 'id', ...store.type(t).columns }, key: ['user_id', 'id'], access: 'record', person: 'user_id' };
+        columns[t] = { table: t, kinds: { user_id: 'id', ...store.type(t).columns }, key: ['user_id', 'id'], access: 'record', person: 'user_id' };
     for (const [name, d] of Object.entries(types)) {
         const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
-        columns[d.table ?? name] = {
+        columns[name] = {
+            table: d.table ?? name,
             kinds: { ...(person ? { [person]: 'id' } : {}), ...d.fields },
             key: [...(person ? [person] : []), ...d.key],
             access: d.access,
@@ -158,7 +159,9 @@ function checkTypes(types) {
     for (const [name, d] of Object.entries(types)) {
         if (!['person', 'shared', 'system'].includes(d.access))
             throw new EngineError('bad_access', name);
-        if (ENGINE_TABLES.includes(d.table ?? name))
+        // A type can't be called after the engine's own tables. Its table may share a name with one if the backend keeps it
+        // elsewhere (another schema): the backend checks that, since only it knows where tables are.
+        if (ENGINE_TABLES.includes(name))
             throw new EngineError('engine_table', name);
         for (const k of [...d.key, ...(d.query ?? []), ...(d.sealed ?? []), ...(d.version ? [d.version] : [])])
             if (!d.fields[k])
@@ -228,7 +231,7 @@ class Core {
             queryable.set(n, { col: n, kind: d.fields[n] });
         for (const [n, x] of Object.entries(d.paths ?? {}))
             queryable.set(n, { col: n, kind: x.kind });
-        return { name: type, table: d.table ?? type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
+        return { name: type, table: type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
     }
     /** Whether this unit may read or write a type (ADR 0009); the person filter a query takes when it may. */
     allow(sh, write) {
