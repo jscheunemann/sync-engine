@@ -71,9 +71,10 @@ type Kinds = Readonly<Record<string, Kind>>;
  * tables) by its value: objects as jsonb.
  */
 function param(tx: Tx, v: unknown, kind?: Kind): unknown {
+  // A list of ids is never null: none is an empty list (as Clearwork has always stored it), so the column can be not null.
+  if (kind === 'ids') return `{${((v as string[] | null | undefined) ?? []).join(',')}}`;
   if (v === undefined || v === null) return null;
   if (typeof v === 'bigint') return v.toString();
-  if (kind === 'ids') return `{${(v as string[]).join(',')}}`;
   if (kind === 'json' || (kind === undefined && typeof v === 'object' && !(v instanceof Date))) return tx.json(v as never);
   return v;
 }

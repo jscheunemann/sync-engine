@@ -27,12 +27,13 @@ function rule(e) {
  * tables) by its value: objects as jsonb.
  */
 function param(tx, v, kind) {
+    // A list of ids is never null: none is an empty list (as Clearwork has always stored it), so the column can be not null.
+    if (kind === 'ids')
+        return `{${(v ?? []).join(',')}}`;
     if (v === undefined || v === null)
         return null;
     if (typeof v === 'bigint')
         return v.toString();
-    if (kind === 'ids')
-        return `{${v.join(',')}}`;
     if (kind === 'json' || (kind === undefined && typeof v === 'object' && !(v instanceof Date)))
         return tx.json(v);
     return v;

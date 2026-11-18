@@ -394,6 +394,7 @@ create table ${S}.tasks (
     assert.deepEqual(many.map((r) => r.status), ['applied', 'applied']);
     assert.deepEqual((many[0] as { record: StoredRecord }).record.tags, []);
     assert.deepEqual((many[1] as { record: StoredRecord }).record.due, null);
+    assert.deepEqual((many[1] as { record: StoredRecord }).record.tags, [], 'no list is an empty list');
     const [stored] = await admin.unsafe(`select tags::text as tags, due, content from ${S}.tasks where id = '${got.id}'`);
     assert.equal(stored!.tags, `{${fields.tags.join(',')}}`, 'a uuid array');
     assert.deepEqual(stored!.due, fields.due, 'jsonb, as the device sent it');

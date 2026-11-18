@@ -96,7 +96,7 @@ export class RecordType {
             rec.sealed = content.c;
         for (const f of this.names) {
             const d = this.fields[f];
-            rec[f] = isContent(d) ? (rec.enc === 2 ? null : (content?.[f] ?? null)) : out(kindOf(d), row[f]);
+            rec[f] = isContent(d) ? (rec.enc === 2 ? null : (content?.[f] ?? null)) : kindOf(d) === 'ids' ? (out('ids', row[f]) ?? []) : out(kindOf(d), row[f]);
         }
         return rec;
     }

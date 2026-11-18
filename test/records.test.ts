@@ -28,6 +28,7 @@ test('a row comes back as a record: times as ISO, numbers as numbers, id lists a
   );
   assert.deepEqual(t.toRecord({ ...row, tags: [], content: JSON.stringify({ notes: 'x' }) }).tags, []);
   assert.deepEqual(t.toRecord({ ...row, tags: '{}' }).tags, []);
+  assert.deepEqual(t.toRecord({ ...row, tags: null }).tags, [], 'no list is an empty list');
 });
 
 test('sealed by the device: the ciphertext comes back as sealed, the content fields null', () => {
