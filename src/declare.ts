@@ -4,8 +4,14 @@
 
 import type { Cond, Row } from './backend.ts';
 
-/** The kind of a field: what values it takes, and how it comes back (times as ISO strings, numbers as numbers). */
-export type Kind = 'text' | 'number' | 'boolean' | 'time' | 'id' | 'json';
+/**
+ * The kind of a field: what values it takes, how it's stored, and how it comes back (times as ISO strings, numbers as
+ * numbers). `ids` is a list of ids; `json` any JSON value. The engine picks each kind's column type (part 4, ADR 0014).
+ */
+export type Kind = 'text' | 'number' | 'integer' | 'boolean' | 'time' | 'id' | 'ids' | 'json';
+
+/** Kinds a find may filter and order by (not lists or JSON). */
+export const QUERYABLE: readonly Kind[] = ['text', 'number', 'integer', 'boolean', 'time', 'id'];
 
 /** A type that isn't synced from devices (ADR 0003): written by the app's server, read through find. */
 export interface TypeDecl {
@@ -80,6 +86,10 @@ export function fits(kind: Kind, v: unknown): boolean {
       return typeof v === 'string' && v.length > 0 && v.length <= 200;
     case 'number':
       return typeof v === 'number' && Number.isFinite(v);
+    case 'integer':
+      return Number.isSafeInteger(v);
+    case 'ids':
+      return Array.isArray(v) && v.length <= 10000 && v.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 200 && !/[{},"\\\s]/.test(x));
     case 'boolean':
       return typeof v === 'boolean';
     case 'time':
@@ -93,9 +103,18 @@ export function fits(kind: Kind, v: unknown): boolean {
 export function out(kind: Kind, v: unknown): unknown {
   if (v === null || v === undefined) return null;
   if (kind === 'time') return new Date(v as string).toISOString();
-  if (kind === 'number') return Number(v);
+  if (kind === 'number' || kind === 'integer') return Number(v);
+  if (kind === 'ids') return idList(v);
   if (kind === 'id') return String(v);
   return v;
+}
+
+/** A list of ids as stored: an array, or Postgres's text form of one (`{a,b}`) where a driver leaves it as text. */
+function idList(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map(String);
+  const s = String(v);
+  if (s === '{}' || s === '') return [];
+  return s.replace(/^\{|\}$/g, '').split(',').map((x) => x.replace(/^"|"$/g, ''));
 }
 
 /** Conditions from a where, against the fields that may be queried (name → column and kind). */

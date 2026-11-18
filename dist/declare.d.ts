@@ -1,6 +1,11 @@
 import type { Cond, Row } from './backend.js';
-/** The kind of a field: what values it takes, and how it comes back (times as ISO strings, numbers as numbers). */
-export type Kind = 'text' | 'number' | 'boolean' | 'time' | 'id' | 'json';
+/**
+ * The kind of a field: what values it takes, how it's stored, and how it comes back (times as ISO strings, numbers as
+ * numbers). `ids` is a list of ids; `json` any JSON value. The engine picks each kind's column type (part 4, ADR 0014).
+ */
+export type Kind = 'text' | 'number' | 'integer' | 'boolean' | 'time' | 'id' | 'ids' | 'json';
+/** Kinds a find may filter and order by (not lists or JSON). */
+export declare const QUERYABLE: readonly Kind[];
 /** A type that isn't synced from devices (ADR 0003): written by the app's server, read through find. */
 export interface TypeDecl {
     /** The table, when it isn't the type's name. */

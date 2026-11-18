@@ -10,11 +10,15 @@
 // applied_ops and prefs, all in the app's schema.
 
 import pg from 'postgres';
+import type { Kind } from './declare.ts';
+import { CATALOG_SQL, type Catalog, plan } from './postgres-schema.ts';
 import { type Backend, type Cond, type Connection, isSystem, type Layout, type Query, type Row, RuleError, type Scope, type Tombstone, type Unit } from './backend.ts';
 
 /** How to reach the database. On Cloudflare Workers, pass Hyperdrive's connection string as `url`. */
 export interface PostgresSettings {
   url: string;
+  /** The schema the app's tables are in (ADR 0014: where data lives is the backend's setting, not the app's). */
+  schema: string;
   /** Connections at most, per session (default 5). */
   max?: number;
   /** The setting the database's row-level security reads for the person (default `app.user_id`). */
@@ -39,10 +43,12 @@ interface Tx {
   (value: unknown, ...columns: string[]): Frag;
   json(value: unknown): unknown;
   savepoint?<R>(fn: (sp: Tx) => Promise<R>): Promise<R>;
+  unsafe(query: string, params?: unknown[]): Frag;
   begin<R>(fn: (tx: Tx) => Promise<R>): Promise<R>;
 }
 interface Sql extends Tx {
   end(): Promise<void>;
+  unsafe(query: string, params?: unknown[]): Frag;
 }
 
 /** A savepoint: `savepoint` on Postgres.js 3; on 4 a nested `begin` is one, and `savepoint` is kept as long as it is. */
@@ -57,21 +63,30 @@ function rule(e: unknown): unknown {
   return new RuleError(String((e as { constraint_name?: string }).constraint_name ?? ''), code === REF ? 'reference' : 'rule');
 }
 
-/** Values the driver writes as they are: change numbers as text (bigint), objects as jsonb. */
-function value(tx: Tx, k: string, v: unknown): unknown {
+type Kinds = Readonly<Record<string, Kind>>;
+
+/**
+ * A value as the driver writes it, by its column's kind: JSON as jsonb, a list of ids as a text array (Postgres's text
+ * form, which both driver majors send as it is), change numbers as text. A column without a kind (the engine's own
+ * tables) by its value: objects as jsonb.
+ */
+function param(tx: Tx, v: unknown, kind?: Kind): unknown {
+  if (v === undefined || v === null) return null;
   if (typeof v === 'bigint') return v.toString();
-  if (k === 'content' && v !== null && typeof v === 'object') return tx.json(v as never);
-  return v === undefined ? null : v;
+  if (kind === 'ids') return `{${(v as string[]).join(',')}}`;
+  if (kind === 'json' || (kind === undefined && typeof v === 'object' && !(v instanceof Date))) return tx.json(v as never);
+  return v;
 }
 
-function cols(tx: Tx, row: Row): Row {
+function cols(tx: Tx, row: Row, kinds: Kinds): Row {
   const out: Row = {};
-  for (const [k, v] of Object.entries(row)) out[k] = value(tx, k, v);
+  for (const [k, v] of Object.entries(row)) out[k] = param(tx, v, kinds[k]);
   return out;
 }
 
 /** One condition as SQL. Columns are names the engine checked against the app's declarations. */
-function cond(tx: Tx, c: Cond): Frag {
+function cond(tx: Tx, c: Cond, kinds: Kinds): Frag {
+  const k = kinds[c.col];
   const col = tx(c.col);
   switch (c.op) {
     case 'null':
@@ -79,42 +94,34 @@ function cond(tx: Tx, c: Cond): Frag {
     case 'notnull':
       return tx`${col} is not null`;
     case 'in':
-      return c.value.length ? tx`${col} in ${tx(c.value.map((v) => param(tx, v)) as never)}` : tx`false`;
+      return c.value.length ? tx`${col} in ${tx(c.value.map((v) => param(tx, v, k)) as never)}` : tx`false`;
     case 'eq':
-      return tx`${col} = ${param(tx, c.value) as never}`;
+      return tx`${col} = ${param(tx, c.value, k) as never}`;
     case 'ne':
-      return tx`${col} is distinct from ${param(tx, c.value) as never}`;
+      return tx`${col} is distinct from ${param(tx, c.value, k) as never}`;
     case 'gt':
-      return tx`${col} > ${param(tx, c.value) as never}`;
+      return tx`${col} > ${param(tx, c.value, k) as never}`;
     case 'gte':
-      return tx`${col} >= ${param(tx, c.value) as never}`;
+      return tx`${col} >= ${param(tx, c.value, k) as never}`;
     case 'lt':
-      return tx`${col} < ${param(tx, c.value) as never}`;
+      return tx`${col} < ${param(tx, c.value, k) as never}`;
     case 'lte':
-      return tx`${col} <= ${param(tx, c.value) as never}`;
+      return tx`${col} <= ${param(tx, c.value, k) as never}`;
   }
-}
-
-/** A value for a parameter: objects and arrays as jsonb, times as they are. */
-function param(tx: Tx, v: unknown): unknown {
-  if (v === undefined) return null;
-  if (typeof v === 'bigint') return v.toString();
-  if (v !== null && typeof v === 'object' && !(v instanceof Date)) return tx.json(v as never);
-  return v;
 }
 
 const and = (tx: Tx, parts: Frag[]) => (parts.length ? parts.reduce((a, b) => tx`${a} and ${b}`) : tx`true`);
 const or = (tx: Tx, parts: Frag[]) => parts.reduce((a, b) => tx`(${a}) or (${b})`);
 
 /** The conditions of a query: its own, its person, and its cursor (keyset paging; nulls in the order column last). */
-function filter(tx: Tx, q: Query): Frag {
-  const parts = q.where.map((c) => cond(tx, c));
+function filter(tx: Tx, q: Query, kinds: Kinds): Frag {
+  const parts = q.where.map((c) => cond(tx, c, kinds));
   if (q.person !== null) parts.push(tx`${tx(q.personColumn)} = ${q.person}`);
   if (q.after) {
     const desc = q.order?.desc ?? false;
     const keyVals = q.order ? q.after.slice(1) : q.after;
     const keys = tx`(${q.key.map((k) => tx`${tx(k)}`).reduce((a, b) => tx`${a}, ${b}`)})`;
-    const vals = tx`(${keyVals.map((v) => tx`${param(tx, v) as never}`).reduce((a, b) => tx`${a}, ${b}`)})`;
+    const vals = tx`(${keyVals.map((v, i) => tx`${param(tx, v, kinds[q.key[i]!]) as never}`).reduce((a, b) => tx`${a}, ${b}`)})`;
     const pastKey = desc ? tx`${keys} < ${vals}` : tx`${keys} > ${vals}`;
     if (!q.order) parts.push(pastKey);
     else {
@@ -122,16 +129,16 @@ function filter(tx: Tx, q: Query): Frag {
       const v = q.after[0];
       if (v === null) parts.push(tx`${col} is null and ${pastKey}`);
       else {
-        const past = desc ? tx`${col} < ${param(tx, v) as never}` : tx`${col} > ${param(tx, v) as never}`;
-        parts.push(tx`(${or(tx, [past, tx`${col} = ${param(tx, v) as never} and ${pastKey}`, tx`${col} is null`])})`);
+        const past = desc ? tx`${col} < ${param(tx, v, kinds[q.order.col]) as never}` : tx`${col} > ${param(tx, v, kinds[q.order.col]) as never}`;
+        parts.push(tx`(${or(tx, [past, tx`${col} = ${param(tx, v, kinds[q.order.col]) as never} and ${pastKey}`, tx`${col} is null`])})`);
       }
     }
   }
   return and(tx, parts);
 }
 
-function unit(tx: Tx, layout: Layout, person: string | null): Unit {
-  const schema = layout.schema;
+function unit(tx: Tx, layout: Layout, schema: string, person: string | null): Unit {
+  const kindsOf = (t: string): Kinds => layout.columns?.[t]?.kinds ?? {};
   const table = (name: string) => tx`${tx(schema)}.${tx(name)}`;
   const declared = (name: string) => {
     if (!layout.types.includes(name) && !(layout.tables ?? []).includes(name)) throw new Error('unknown_table');
@@ -149,7 +156,7 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
   const u: Unit = {
     savepoint: async (fn) => {
       try {
-        return await savepoint(tx, (sp) => fn(unit(sp, layout, person)));
+        return await savepoint(tx, (sp) => fn(unit(sp, layout, schema, person)));
       } catch (e) {
         throw rule(e);
       }
@@ -172,7 +179,7 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
     insertRows: async (type, rows) => {
       if (!rows.length) return [];
       const t = known(type);
-      const list = rows.map((r) => cols(tx, { ...r, user_id: own() }));
+      const list = rows.map((r) => cols(tx, { ...r, user_id: own() }, kindsOf(type)));
       try {
         return (await tx`insert into ${t} ${tx(list as never)} returning *`) as unknown as Row[];
       } catch (e) {
@@ -182,7 +189,7 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
     updateRow: async (type, id, c) => {
       const t = known(type);
       try {
-        const [row] = await tx`update ${t} set ${tx(cols(tx, c) as never)} where user_id = ${own()} and id = ${id} returning *`;
+        const [row] = await tx`update ${t} set ${tx(cols(tx, c, kindsOf(type)) as never)} where user_id = ${own()} and id = ${id} returning *`;
         return row as Row;
       } catch (e) {
         throw rule(e);
@@ -254,17 +261,16 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
       const keyOrder = q.key.map((k) => tx`${tx(k)} ${dir}`);
       const order = [...(q.order ? [tx`${tx(q.order.col)} ${dir} nulls last`] : []), ...keyOrder].reduce((a, b) => tx`${a}, ${b}`);
       const limit = q.limit !== undefined ? tx`limit ${q.limit}` : tx``;
-      return (await tx`select * from ${t} where ${filter(tx, q)} order by ${order} ${limit}`) as unknown as Row[];
+      return (await tx`select * from ${t} where ${filter(tx, q, kindsOf(q.table))} order by ${order} ${limit}`) as unknown as Row[];
     },
     count: async (q) => {
       const t = declared(q.table);
-      const [row] = await tx`select count(*)::int as n from ${t} where ${filter(tx, { ...q, after: undefined })}`;
+      const [row] = await tx`select count(*)::int as n from ${t} where ${filter(tx, { ...q, after: undefined }, kindsOf(q.table))}`;
       return Number(row!.n);
     },
     insert: async (name, row) => {
       const t = declared(name);
-      const c: Row = {};
-      for (const [k, v] of Object.entries(row)) c[k] = param(tx, v);
+      const c = cols(tx, row, kindsOf(name));
       try {
         const [stored] = await tx`insert into ${t} ${tx(c as never)} returning *`;
         return stored as Row;
@@ -274,14 +280,13 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
     },
     update: async (name, match, changes) => {
       const t = declared(name);
-      const c: Row = {};
-      for (const [k, v] of Object.entries(changes)) c[k] = param(tx, v);
+      const c = cols(tx, changes, kindsOf(name));
       if (!Object.keys(c).length) {
-        const [row] = await tx`select * from ${t} where ${and(tx, match.map((m) => cond(tx, m)))} for update`;
+        const [row] = await tx`select * from ${t} where ${and(tx, match.map((m) => cond(tx, m, kindsOf(name))))} for update`;
         return (row as Row | undefined) ?? null;
       }
       try {
-        const [row] = await tx`update ${t} set ${tx(c as never)} where ${and(tx, match.map((m) => cond(tx, m)))} returning *`;
+        const [row] = await tx`update ${t} set ${tx(c as never)} where ${and(tx, match.map((m) => cond(tx, m, kindsOf(name))))} returning *`;
         return (row as Row | undefined) ?? null;
       } catch (e) {
         throw rule(e);
@@ -291,7 +296,7 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
       const t = declared(name);
       try {
         // Counted from what came back: the result's `count` isn't promised on every driver version.
-        const r = await tx`delete from ${t} where ${and(tx, match.map((m) => cond(tx, m)))} returning 1 as gone`;
+        const r = await tx`delete from ${t} where ${and(tx, match.map((m) => cond(tx, m, kindsOf(name))))} returning 1 as gone`;
         return r.length;
       } catch (e) {
         throw rule(e);
@@ -304,11 +309,62 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
   return u;
 }
 
+function checked(settings: PostgresSettings): string {
+  if (!settings?.url) throw new Error('no_database');
+  const schema = settings.schema;
+  if (typeof schema !== 'string' || !/^[a-z_][a-z0-9_]{0,62}$/.test(schema)) throw new Error('bad_schema');
+  return schema;
+}
+
+/** What the schema has now, for a plan. */
+async function inspect(sql: Sql, schema: string, roles: string[]): Promise<Catalog> {
+  const run = (q: string, p: unknown[] = [schema]) => sql.unsafe(q, p) as Promise<Row[]>;
+  const [ns, cols, fns, rls, pols, idx, grants, usage] = await Promise.all([
+    run(CATALOG_SQL.schema), run(CATALOG_SQL.columns), run(CATALOG_SQL.functions), run(CATALOG_SQL.rls), run(CATALOG_SQL.policies), run(CATALOG_SQL.indexes),
+    run(CATALOG_SQL.grants), run(CATALOG_SQL.usage, [schema, `{${roles.join(',')}}`]),
+  ]);
+  const c: Catalog = { schema: ns.length > 0, columns: {}, functions: fns.map((r) => String(r.f)), rls: {}, policies: {}, indexes: idx.map((r) => String(r.i)), grants: {}, usage: usage.map((r) => String(r.r)) };
+  for (const r of cols) (c.columns[String(r.t)] ??= {})[String(r.c)] = String(r.u);
+  for (const r of rls) c.rls[String(r.t)] = { enabled: !!r.enabled, forced: !!r.forced };
+  for (const r of pols) (c.policies[String(r.t)] ??= []).push(String(r.p));
+  for (const r of grants) ((c.grants[String(r.o)] ??= {})[String(r.r)] ??= []).push(String(r.p));
+  return c;
+}
+
 /** The Postgres backend. */
 export const postgres: Backend<PostgresSettings> = {
   kind: 'postgres',
+  schema: {
+    async plan(settings, layout) {
+      const schema = checked(settings);
+      const sql = pg(settings.url, { max: 1, fetch_types: false, onnotice: () => {} }) as unknown as Sql;
+      try {
+        const roles = [settings.role, settings.systemRole].filter((r): r is string => !!r);
+        return plan(layout, await inspect(sql, schema, roles), {
+          schema,
+          personSetting: settings.personSetting ?? 'app.user_id',
+          ...(settings.role ? { role: settings.role } : {}),
+          ...(settings.systemRole ? { systemRole: settings.systemRole } : {}),
+        });
+      } finally {
+        await sql.end();
+      }
+    },
+    async apply(settings, p) {
+      checked(settings);
+      const sql = pg(settings.url, { max: 1, fetch_types: false, onnotice: () => {} }) as unknown as Sql;
+      try {
+        // All steps or none: Postgres changes a schema inside a transaction.
+        await sql.begin(async (tx) => {
+          for (const s of p.steps) await tx.unsafe(s.sql);
+        });
+      } finally {
+        await sql.end();
+      }
+    },
+  },
   connect(settings: PostgresSettings, layout: Layout): Connection {
-    if (!settings?.url) throw new Error('no_database');
+    const schema = checked(settings);
     const sql = pg(settings.url, {
       max: settings.max ?? 5,
       fetch_types: false, // no extra round trip on connect; the engine uses only built-in types
@@ -329,7 +385,7 @@ export const postgres: Backend<PostgresSettings> = {
           // otherwise rounded to 15 digits). A system unit sets no person: row-level security then shows no one's rows
           // to anything but the system role.
           await tx`select set_config(${personSetting}, ${sys ? '' : scope.person}, true), set_config('extra_float_digits', '3', true)`;
-          return fn(unit(tx, layout, sys ? null : scope.person));
+          return fn(unit(tx, layout, schema, sys ? null : scope.person));
         }) as Promise<R>;
       },
       close: () => sql.end(),

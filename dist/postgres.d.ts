@@ -2,6 +2,8 @@ import { type Backend } from './backend.js';
 /** How to reach the database. On Cloudflare Workers, pass Hyperdrive's connection string as `url`. */
 export interface PostgresSettings {
     url: string;
+    /** The schema the app's tables are in (ADR 0014: where data lives is the backend's setting, not the app's). */
+    schema: string;
     /** Connections at most, per session (default 5). */
     max?: number;
     /** The setting the database's row-level security reads for the person (default `app.user_id`). */

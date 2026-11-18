@@ -58,6 +58,6 @@ jobs:
         run: grep -m1 '"version"' node_modules/postgres/package.json
       - run: npx tsc --noEmit -p tsconfig.v2.json
       - name: Version 2's tests
-        run: node --test test/contract.test.ts test/intents.test.ts test/device.test.ts test/merge.test.ts
+        run: node --test test/contract.test.ts test/intents.test.ts test/records.test.ts test/schema.test.ts test/device.test.ts test/merge.test.ts
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
