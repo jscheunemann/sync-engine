@@ -17,6 +17,11 @@ export interface TypeDecl {
      *   * `system`: to no one, reached only by a system intent (invitations, analytics).
      */
     access: 'person' | 'shared' | 'system';
+    /**
+     * A view the app's own migrations define (ADR 0018): read like any type, never written; the schema plan checks it's
+     * there with the declared columns and never makes it.
+     */
+    view?: true;
     /** The column naming a row's person (`person` types; default `user_id`). */
     personColumn?: string;
     /** The key, without the person column: `['id']`, `['version']`, or `[]` for one row per person. */

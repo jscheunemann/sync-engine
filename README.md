@@ -48,7 +48,7 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 
 ## Version 2: the engine owns data access
 
-Version 2.0.0 (ADR 0011). Install with `github:jscheunemann/sync-engine#v2.1.0`. Version 1's `./server` is still in the
+Version 2.0.0 (ADR 0011). Install with `github:jscheunemann/sync-engine#v2.2.0`. Version 1's `./server` is still in the
 package, unchanged, for apps that haven't moved yet.
 
 Following `docs/adr/` 0002 to 0016, an app gives the engine connection settings and intents; the engine owns the
@@ -114,6 +114,7 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
   `<schema>.engine_audit` (no values).
 - `w.summarize(type, { where, by, measures, order, limit })`: groups (fields, JSON `paths`, or `{ day, zone }`) with
   `count`, `distinct`, `sum`, `avg`, `min`, `max` and `percentile`, each with its own `where` if wanted (ADR 0016).
+- A type can be a view the app's migrations define (`view: true`): read like any type, never written (ADR 0018).
 - Postgres keeps tables in `schema`, or per type in `schemas: { type: schema }` for tables adopted elsewhere (ADR 0017).
 - `w.put(type, row, { onConflict: 'update' | 'nothing' })` for insert-or-update; `w.lock(name)` for the rest of the unit.
 - Refusals are `EngineError`s: a code and a field, never a value.

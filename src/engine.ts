@@ -216,6 +216,7 @@ export function createEngine<T extends string, S>(opts: {
     const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
     columns[name] = {
       table: d.table ?? name,
+      ...(d.view ? { view: true as const } : {}),
       kinds: { ...(person ? { [person]: 'id' as Kind } : {}), ...d.fields },
       key: [...(person ? [person] : []), ...d.key],
       access: d.access,
@@ -517,6 +518,7 @@ class Core<T extends string> {
   private writable(type: string): { sh: Shape; person: string | null } {
     const sh = this.shape(type);
     if (sh.record) throw new EngineError('records_use_apply', type);
+    if (sh.decl?.view) throw new EngineError('read_only', type);
     return { sh, person: this.allow(sh, true) };
   }
 

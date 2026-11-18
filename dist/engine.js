@@ -73,6 +73,7 @@ export function createEngine(opts) {
         const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
         columns[name] = {
             table: d.table ?? name,
+            ...(d.view ? { view: true } : {}),
             kinds: { ...(person ? { [person]: 'id' } : {}), ...d.fields },
             key: [...(person ? [person] : []), ...d.key],
             access: d.access,
@@ -397,6 +398,8 @@ class Core {
         const sh = this.shape(type);
         if (sh.record)
             throw new EngineError('records_use_apply', type);
+        if (sh.decl?.view)
+            throw new EngineError('read_only', type);
         return { sh, person: this.allow(sh, true) };
     }
     /** Columns from what the app gave: declared fields only, each of its kind, sealed ones sealed. */

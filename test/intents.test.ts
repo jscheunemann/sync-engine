@@ -13,7 +13,7 @@ import { postgres } from '../src/postgres.ts';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sqlite, sqliteRows } from './sqlite-backend.ts';
+import { sqlite, sqliteExec, sqliteRows } from './sqlite-backend.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'notes';
@@ -45,11 +45,13 @@ const types: Record<string, TypeDecl> = {
     query: ['viewer', 'sid', 't', 'a', 'tab'],
     paths: { name: { from: 'e', path: ['name'], kind: 'text' }, dur: { from: 'e', path: ['dur'], kind: 'number' }, test: { from: 'e', path: ['test'], kind: 'boolean' } },
   },
+  // A view the app's migrations make: today's events with a duration, read like any type.
+  timed: { access: 'system', view: true, key: ['id'], fields: { id: 'id', a: 'text', ms: 'number' }, query: ['a', 'ms'] },
   viewers: { access: 'system', key: ['viewer'], fields: { viewer: 'text', first_seen: 'time', last_seen: 'time', os: 'text' } },
 };
 const system: Record<string, SystemDecl> = {
   invite: { write: ['invitations'] },
-  analytics: { write: ['events', 'viewers'] },
+  analytics: { write: ['events', 'viewers'], read: ['timed'] },
   owner_report: { read: ['docs', 'settings'] },
   set_signup: { write: ['settings'] },
 };
@@ -284,6 +286,16 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.ok(log.some((x) => x.intent === 'analytics' && x.action === 'summarize'), 'summaries are audited');
     });
 
+    test('a view: read like any type (find, count, summarize), never written', async () => {
+      const page = await sys('analytics')((w) => w.find('timed', { where: { a: 'dwell' } }));
+      assert.deepEqual(page.rows.map((x) => x.ms).sort(), [1000, 3000]);
+      assert.equal(await sys('analytics')((w) => w.count('timed')), 2);
+      const [sum] = await sys('analytics')((w) => w.summarize('timed', { measures: { ms: { sum: 'ms' } } }));
+      assert.equal(sum!.ms, 4000);
+      await code(sys('analytics')((w) => w.put('timed', { id: uuidv7(), a: 'x', ms: 1 })), 'read_only', 'timed');
+      await code(sys('analytics')((w) => w.remove('timed', { id: uuidv7() })), 'read_only', 'timed');
+    });
+
     test('put on a taken key: update, or leave it; a lock holds for the unit', async () => {
       const first = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', first_seen: '2026-11-01T00:00:00.000Z', last_seen: '2026-11-01T00:00:00.000Z', os: 'ios' }));
       assert.equal(first!.os, 'ios');
@@ -326,7 +338,11 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       audit: async () => sqliteRows(path, `select intent, by_person, type, action, rows from engine_audit order by id`) as Row[],
     };
   });
-  before(async () => engine.migrate({ path }, await engine.plan({ path })));
+  before(async () => {
+    await engine.migrate({ path }, await engine.plan({ path }));
+    // The view is the app's (its migrations make it), so the test makes it here.
+    sqliteExec(path, `create view timed as select id, a, json_extract(e, '$.dur') as ms from events where json_type(e, '$.dur') in ('integer', 'real')`);
+  });
 }
 
 describe('declarations are checked when the engine is made', () => {
@@ -357,6 +373,7 @@ create table ${S}.keys (user_id uuid not null default ${S}.current_user_id(), ve
 create table ${S}.settings (name text primary key, value jsonb not null);
 create table ${S}.invitations (id uuid primary key, code text not null unique, email text not null, redeemed_at timestamptz);
 create table ${S}.events (id uuid primary key, viewer text, sid text, t timestamptz, a text, tab text, e jsonb);
+create view ${S}.timed as select id, a, (e ->> 'dur')::double precision as ms from ${S}.events where jsonb_typeof(e -> 'dur') = 'number';
 create table ${S}.viewers (viewer text primary key, first_seen timestamptz, last_seen timestamptz, os text);
 create table ${S}.engine_audit (id bigint generated always as identity primary key, at timestamptz not null default now(), intent text not null,
   by_person uuid, type text not null, action text not null, rows integer not null);
@@ -371,7 +388,7 @@ create policy system on ${S}.${t} for all to se2_int_sys using (true) with check
 alter table ${S}.settings enable row level security; alter table ${S}.settings force row level security;
 create policy read on ${S}.settings for select to se2_int_api using (true);
 create policy system on ${S}.settings for all to se2_int_sys using (true) with check (true);
-revoke all on ${S}.invitations, ${S}.events, ${S}.viewers, ${S}.engine_audit from se2_int_api;
+revoke all on ${S}.invitations, ${S}.events, ${S}.timed, ${S}.viewers, ${S}.engine_audit from se2_int_api;
 `;
 
 let admin: ReturnType<typeof pg> | undefined;
