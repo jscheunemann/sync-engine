@@ -10,6 +10,8 @@
 // applied_ops and prefs, all in the app's schema.
 import pg from 'postgres';
 import { isSystem, RuleError } from "./backend.js";
+/** A savepoint: `savepoint` on Postgres.js 3; on 4 a nested `begin` is one, and `savepoint` is kept as long as it is. */
+const savepoint = (tx, fn) => (tx.savepoint ? tx.savepoint(fn) : tx.begin(fn));
 const REF = '23503';
 /** A database rule refusing a write, as the engine's RuleError; anything else as it was. */
 function rule(e) {
@@ -116,7 +118,7 @@ function unit(tx, layout, person) {
     const u = {
         savepoint: async (fn) => {
             try {
-                return (await tx.savepoint((sp) => fn(unit(sp, layout, person))));
+                return await savepoint(tx, (sp) => fn(unit(sp, layout, person)));
             }
             catch (e) {
                 throw rule(e);
@@ -271,8 +273,9 @@ function unit(tx, layout, person) {
         remove: async (name, match) => {
             const t = declared(name);
             try {
-                const r = await tx `delete from ${t} where ${and(tx, match.map((m) => cond(tx, m)))}`;
-                return r.count;
+                // Counted from what came back: the result's `count` isn't promised on every driver version.
+                const r = await tx `delete from ${t} where ${and(tx, match.map((m) => cond(tx, m)))} returning 1 as gone`;
+                return r.length;
             }
             catch (e) {
                 throw rule(e);

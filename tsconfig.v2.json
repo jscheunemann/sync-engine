@@ -1,0 +1,7 @@
+{
+  // Version 2 against another driver major (CI's driver job): everything but version 1's server, which takes the
+  // app's own driver and its types.
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["src/server.ts", "test/server.test.ts"]
+}
