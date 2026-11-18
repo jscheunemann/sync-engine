@@ -48,6 +48,8 @@ export interface Layout {
 export interface TableLayout {
   /** The table's name (a type's own name unless it declared another). */
   readonly table: string;
+  /** A view the app defines: read only, checked by a schema plan, never made. */
+  readonly view?: true;
   readonly kinds: Readonly<Record<string, Kind>>;
   readonly key: readonly string[];
   /** `record` (synced from devices), or a declared type's access. */

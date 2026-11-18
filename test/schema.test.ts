@@ -90,6 +90,21 @@ describe('the plan', () => {
     assert.doesNotMatch(sql, /create table "app"\."invitations"/);
   });
 
+  test('a view: never made; missing, or a column missing or of another type, is a conflict; read grants only (ADR 0018)', () => {
+    let seen: unknown;
+    const spy = { kind: 'spy', connect: (_s: unknown, l: unknown) => ((seen = l), { unit: async () => undefined as never, close: async () => {} }) };
+    createEngine({ store, backend: spy, types: { ...types, events: { access: 'system', view: true, key: ['id'], fields: { id: 'id', a: 'text', t: 'time' } } }, system }).connect({});
+    const L = seen as Parameters<typeof plan>[0];
+    const missing = plan(L, {}, opts);
+    assert.deepEqual(missing.conflicts, [{ table: 'app.events', issue: 'missing_view' }]);
+    assert.doesNotMatch(missing.steps.map((x) => x.sql).join('\n'), /"events"/);
+    const there = plan(L, { app: { ...NONE, schema: true, columns: { events: { id: 'uuid', a: 'text', t: 'text' } } } }, opts);
+    assert.deepEqual(there.conflicts.filter((c) => c.table === 'app.events'), [{ table: 'app.events', column: 't', issue: 'type', want: 'timestamptz', have: 'text' }]);
+    const sql = there.steps.map((x) => x.sql).join('\n');
+    assert.match(sql, /grant select on "app"\."events" to "app_sys";/);
+    assert.doesNotMatch(sql, /"events" (enable|force) row level security|on "app"\."events" (for|to "app_api")|index[^\n]*"events"/);
+  });
+
   test('nothing to do when everything is there', () => {
     const p1 = plan(layoutOf(), none, opts);
     // What applying p1 leaves: every table and column, function, index, policy and grant it made.

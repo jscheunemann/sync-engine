@@ -377,11 +377,12 @@ export const sqlite: Backend<SqliteSettings> = {
   schema: {
     async plan(settings, layout): Promise<SchemaPlan> {
       const s = db(settings.path).db;
-      const have = new Set((s.prepare(`select name from sqlite_master where type = 'table'`).all() as { name: string }[]).map((r) => r.name));
+      const have = new Set((s.prepare(`select name from sqlite_master where type in ('table', 'view')`).all() as { name: string }[]).map((r) => r.name));
       const steps: { summary: string; sql: string }[] = [];
       for (const [name, e] of Object.entries(ENGINE)) if (!have.has(name)) steps.push({ summary: `Create the engine's table ${name}`, sql: `${e.ddl};` });
       for (const [type, t] of Object.entries(layout.columns ?? {})) {
         const name = t.table;
+        if (t.view) continue; // made by the app (in tests, by the test), never by a plan
         if (have.has(name)) {
           const cols = new Set((s.prepare(`select name from pragma_table_info(?)`).all(name) as { name: string }[]).map((r) => r.name));
           for (const [c, k] of Object.entries(t.kinds))

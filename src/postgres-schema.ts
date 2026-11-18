@@ -157,6 +157,21 @@ export function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o:
     const { schema, table } = placeOf(type);
     const where = at(schema, table);
     const live = cat(schema).columns[table];
+    if (t.view) {
+      // The app's migrations make it; here it's checked, and read by whom it may be.
+      if (!live) conflicts.push({ table: `${schema}.${table}`, issue: 'missing_view' });
+      else
+        for (const [c, k] of Object.entries(t.kinds)) {
+          const typ = live[c];
+          if (typ === undefined) conflicts.push({ table: `${schema}.${table}`, column: c, issue: 'missing_column' });
+          else if (!FITS[k].includes(typ)) conflicts.push({ table: `${schema}.${table}`, column: c, issue: 'type', want: PG_TYPE[k], have: typ });
+        }
+      if (live) {
+        if (t.access !== 'system') grant(o.role, ['select'], schema, table);
+        grant(o.systemRole, ['select'], schema, table);
+      }
+      continue;
+    }
     if (!live) {
       const cols = Object.entries(t.kinds).map(([c, k]) => `${q(c)} ${columnDdl(t, c, k, main)}`);
       step(`Create table ${schema}.${table}`, `create table ${where} (${cols.join(', ')}${t.key.length ? `, primary key (${t.key.map(q).join(', ')})` : ''});`);
