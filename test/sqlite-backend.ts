@@ -25,7 +25,7 @@ const ENGINE: Readonly<Record<string, { kinds: Kinds; ddl: string }>> = {
 };
 
 const NOW = `(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
-const SQL_TYPE: Readonly<Record<Kind, string>> = { text: 'text', number: 'real', integer: 'integer', boolean: 'integer', time: 'text', id: 'text', ids: 'text', json: 'text' };
+const SQL_TYPE: Readonly<Record<Kind, string>> = { date: 'text', text: 'text', number: 'real', integer: 'integer', boolean: 'integer', time: 'text', id: 'text', ids: 'text', json: 'text' };
 const RECORD_DDL: Readonly<Record<string, string>> = {
   rev: 'integer not null',
   version: 'integer not null default 1',

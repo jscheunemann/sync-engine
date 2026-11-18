@@ -3,7 +3,7 @@ import type { Cond, Row } from './backend.js';
  * The kind of a field: what values it takes, how it's stored, and how it comes back (times as ISO strings, numbers as
  * numbers). `ids` is a list of ids; `json` any JSON value. The engine picks each kind's column type (part 4, ADR 0014).
  */
-export type Kind = 'text' | 'number' | 'integer' | 'boolean' | 'time' | 'id' | 'ids' | 'json';
+export type Kind = 'text' | 'number' | 'integer' | 'boolean' | 'time' | 'date' | 'id' | 'ids' | 'json';
 /** Kinds a find may filter and order by (not lists or JSON). */
 export declare const QUERYABLE: readonly Kind[];
 /** A type that isn't synced from devices (ADR 0003): written by the app's server, read through find. */
@@ -22,6 +22,11 @@ export interface TypeDecl {
      * there with the declared columns and never makes it.
      */
     view?: true;
+    /**
+     * `system` on a person type (ADR 0019): each person reads their own rows, but only system intents write them (a
+     * membership, an owner flag). Default: a person writes their own.
+     */
+    writes?: 'system';
     /** The column naming a row's person (`person` types; default `user_id`). */
     personColumn?: string;
     /** The key, without the person column: `['id']`, `['version']`, or `[]` for one row per person. */

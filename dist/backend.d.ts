@@ -36,6 +36,8 @@ export interface TableLayout {
     readonly table: string;
     /** A view the app defines: read only, checked by a schema plan, never made. */
     readonly view?: true;
+    /** A person type people only read: their role gets read grants only. */
+    readonly personReads?: true;
     readonly kinds: Readonly<Record<string, Kind>>;
     readonly key: readonly string[];
     /** `record` (synced from devices), or a declared type's access. */

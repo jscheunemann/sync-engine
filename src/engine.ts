@@ -217,6 +217,7 @@ export function createEngine<T extends string, S>(opts: {
     columns[name] = {
       table: d.table ?? name,
       ...(d.view ? { view: true as const } : {}),
+      ...(d.writes === 'system' ? { personReads: true as const } : {}),
       kinds: { ...(person ? { [person]: 'id' as Kind } : {}), ...d.fields },
       key: [...(person ? [person] : []), ...d.key],
       access: d.access,
@@ -315,6 +316,7 @@ function checkTypes(types: Readonly<Record<string, TypeDecl>>): void {
     // A type can't be called after the engine's own tables. Its table may share a name with one if the backend keeps it
     // elsewhere (another schema): the backend checks that, since only it knows where tables are.
     if (ENGINE_TABLES.includes(name)) throw new EngineError('engine_table', name);
+    if (d.writes !== undefined && (d.writes !== 'system' || d.access !== 'person')) throw new EngineError('bad_writes', name);
     for (const k of [...d.key, ...(d.query ?? []), ...(d.sealed ?? []), ...(d.version ? [d.version] : [])])
       if (!d.fields[k]) throw new EngineError('undeclared_field', `${name}.${k}`);
     for (const k of d.sealed ?? []) if (d.fields[k] !== 'json') throw new EngineError('sealed_not_json', `${name}.${k}`);
@@ -388,6 +390,7 @@ class Core<T extends string> {
       if (write) throw new EngineError('system_only', sh.name);
       return null;
     }
+    if (write && sh.decl?.writes === 'system') throw new EngineError('system_only', sh.name);
     return this.person;
   }
 
@@ -536,7 +539,8 @@ class Core<T extends string> {
   }
 
   private keyMatch(sh: Shape, key: Row, person: string | null): Cond[] {
-    const names = Object.keys(key);
+    // A system unit names the person of a person type's row in its key; a person unit's person is its own.
+    const names = Object.keys(key).filter((k) => !(sh.access === 'person' && person === null && k === sh.personColumn));
     if (names.length !== sh.key.length || !sh.key.every((k) => names.includes(k))) throw new EngineError('bad_key', sh.name);
     const m: Cond[] = sh.key.map((k) => {
       if (!fits(sh.fields[k]!, key[k]) || key[k] === null) throw new EngineError('bad_value', k);

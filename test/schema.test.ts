@@ -105,6 +105,18 @@ describe('the plan', () => {
     assert.doesNotMatch(sql, /"events" (enable|force) row level security|on "app"\."events" (for|to "app_api")|index[^\n]*"events"/);
   });
 
+  test('a date column; a person type people only read gets read grants and a read policy (ADR 0019)', () => {
+    let seen: unknown;
+    const spy = { kind: 'spy', connect: (_s: unknown, l: unknown) => ((seen = l), { unit: async () => undefined as never, close: async () => {} }) };
+    createEngine({ store, backend: spy, types: { ...types, members: { access: 'person', writes: 'system', key: [], fields: { joined: 'date', via: 'text' } } }, system }).connect({});
+    const sql = plan(seen as Parameters<typeof plan>[0], {}, opts).steps.map((x) => x.sql).join('\n');
+    assert.match(sql, /create table "app"\."members" \("user_id" uuid not null default "app"\.current_user_id\(\), "joined" date, "via" text, primary key \("user_id"\)\);/);
+    assert.match(sql, /grant select on "app"\."members" to "app_api";/);
+    assert.doesNotMatch(sql, /grant [a-z, ]*(insert|update|delete)[a-z, ]* on "app"\."members" to "app_api"/);
+    assert.match(sql, /create policy "engine_person_read" on "app"\."members" for select to "app_api" using \("user_id" = "app"\.current_user_id\(\)\);/);
+    assert.throws(() => createEngine({ store, backend: spy, types: { x: { access: 'shared', writes: 'system', key: [], fields: {} } } }), /bad_writes/);
+  });
+
   test('nothing to do when everything is there', () => {
     const p1 = plan(layoutOf(), none, opts);
     // What applying p1 leaves: every table and column, function, index, policy and grant it made.

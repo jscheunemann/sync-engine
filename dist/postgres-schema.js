@@ -9,6 +9,7 @@ const lit = (s) => `'${s.replace(/'/g, "''")}'`;
 /** The column type each kind gets in a new table or column. */
 export const PG_TYPE = {
     text: 'text',
+    date: 'date',
     number: 'double precision',
     integer: 'integer',
     boolean: 'boolean',
@@ -24,6 +25,7 @@ const FITS = {
     integer: ['int2', 'int4', 'int8'],
     boolean: ['bool'],
     time: ['timestamptz'],
+    date: ['date'],
     id: ['uuid', 'text', 'varchar'],
     ids: ['_uuid', '_text', '_varchar'],
     json: ['jsonb', 'json'],
@@ -94,10 +96,11 @@ export function plan(layout, have, o) {
         if (!(cat(schema).policies[table] ?? []).includes(pname))
             step(`Policy ${pname} on ${schema}.${table}`, `create policy ${q(pname)} on ${at(schema, table)} ${body};`);
     };
-    const personRls = (schema, table, col) => {
+    const personRls = (schema, table, col, readOnly = false) => {
         rlsOn(schema, table);
+        const own = `(${q(col)} = ${M}.current_user_id())`;
         if (o.role)
-            policy(schema, table, 'engine_person', `for all to ${q(o.role)} using (${q(col)} = ${M}.current_user_id()) with check (${q(col)} = ${M}.current_user_id())`);
+            policy(schema, table, readOnly ? 'engine_person_read' : 'engine_person', readOnly ? `for select to ${q(o.role)} using ${own}` : `for all to ${q(o.role)} using ${own} with check ${own}`);
     };
     // The engine's own: who the unit is for, change numbers, the op log, prefs, the audit.
     const mine = cat(main);
@@ -172,14 +175,14 @@ export function plan(layout, have, o) {
         for (const f of t.query ?? [])
             idx([...(t.person ? [t.person] : []), f]);
         if (t.person)
-            personRls(schema, table, t.person);
+            personRls(schema, table, t.person, t.personReads === true);
         else
             rlsOn(schema, table);
         const all = ['select', 'insert', 'update', 'delete'];
         if (t.access === 'record')
             grant(o.role, ['select', 'insert', 'update'], schema, table);
         else if (t.access === 'person')
-            grant(o.role, all, schema, table);
+            grant(o.role, t.personReads ? ['select'] : all, schema, table);
         else if (t.access === 'shared') {
             grant(o.role, ['select'], schema, table);
             if (o.role)

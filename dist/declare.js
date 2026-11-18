@@ -2,7 +2,7 @@
 // use, and its system intents. The engine checks every intent against these before a backend sees it, so a backend is
 // only ever asked for declared tables, columns and values of the declared kind.
 /** Kinds a find may filter and order by (not lists or JSON). */
-export const QUERYABLE = ['text', 'number', 'integer', 'boolean', 'time', 'id'];
+export const QUERYABLE = ['text', 'number', 'integer', 'boolean', 'time', 'date', 'id'];
 /** A refused intent: a code, and the field when there is one; never a value (no user data in errors). */
 export class EngineError extends Error {
     code;
@@ -32,6 +32,9 @@ export function fits(kind, v) {
             return Array.isArray(v) && v.length <= 10000 && v.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 200 && !/[{},"\\\s]/.test(x));
         case 'boolean':
             return typeof v === 'boolean';
+        case 'date':
+            // A local calendar day (ADR 0019): `YYYY-MM-DD`, a real one.
+            return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v);
         case 'time':
             return (typeof v === 'string' && !Number.isNaN(Date.parse(v))) || (v instanceof Date && !Number.isNaN(v.getTime()));
         case 'json':
@@ -44,6 +47,9 @@ export function out(kind, v) {
         return null;
     if (kind === 'time')
         return new Date(v).toISOString();
+    // A driver may hand a date column back as a Date at UTC midnight; the day is its first ten characters either way.
+    if (kind === 'date')
+        return (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10);
     if (kind === 'number' || kind === 'integer')
         return Number(v);
     if (kind === 'ids')
