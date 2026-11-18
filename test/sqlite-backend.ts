@@ -330,7 +330,7 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
       const dir = qy.order?.desc ? 'desc' : 'asc';
       const order = [...(qy.order ? [`${ref(qy.table, qy.order.col)} ${dir} nulls last`] : []), ...qy.key.map((k) => `${q(k)} ${dir}`)].join(', ');
       const f = filter(qy);
-      return all(qy.table, `select * from ${t} where ${f.sql} order by ${order}${qy.limit !== undefined ? ` limit ${Number(qy.limit)}` : ''}`, f.params);
+      return all(qy.table, `select * from ${t} where ${f.sql}${order ? ` order by ${order}` : ''}${qy.limit !== undefined ? ` limit ${Number(qy.limit)}` : ''}`, f.params);
     },
     count: async (qy) => {
       const f = filter({ ...qy, after: undefined });

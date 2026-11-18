@@ -305,9 +305,11 @@ function unit(tx: Tx, layout: Layout, settings: PostgresSettings, person: string
       const t = declared(q.table);
       const dir = q.order?.desc ? tx`desc` : tx`asc`;
       const keyOrder = q.key.map((k) => tx`${tx(k)} ${dir}`);
-      const order = [...(q.order ? [tx`${ref(tx, colsOf(q.table), q.order.col)} ${dir} nulls last`] : []), ...keyOrder].reduce((a, b) => tx`${a}, ${b}`);
+      // A type keyed by its person alone (one row each) has nothing to order by.
+      const parts = [...(q.order ? [tx`${ref(tx, colsOf(q.table), q.order.col)} ${dir} nulls last`] : []), ...keyOrder];
+      const order = parts.length ? tx`order by ${parts.reduce((a, b) => tx`${a}, ${b}`)}` : tx``;
       const limit = q.limit !== undefined ? tx`limit ${q.limit}` : tx``;
-      return (await tx`select * from ${t} where ${filter(tx, q, colsOf(q.table))} order by ${order} ${limit}`) as unknown as Row[];
+      return (await tx`select * from ${t} where ${filter(tx, q, colsOf(q.table))} ${order} ${limit}`) as unknown as Row[];
     },
     count: async (q) => {
       const t = declared(q.table);

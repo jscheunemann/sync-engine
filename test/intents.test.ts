@@ -35,6 +35,7 @@ const types: Record<string, TypeDecl> = {
     sealed: ['body'],
   },
   keys: { access: 'person', key: ['version'], fields: { version: 'number', wrapped: 'text' } },
+  account: { access: 'person', key: [], fields: { prefs: 'json' } },
   settings: { access: 'shared', key: ['name'], fields: { name: 'text', value: 'json' } },
   invitations: { access: 'system', key: ['id'], fields: { id: 'id', code: 'text', email: 'text', redeemed_at: 'time' }, query: ['code', 'redeemed_at'] },
   events: {
@@ -169,6 +170,16 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.equal((await as(A)((w) => w.update('keys', { version: 1 }, { wrapped: 'w1b' }))).status, 'applied');
       assert.equal(await as(A)((w) => w.remove('docs', { id })), true);
       assert.equal(await as(A)((w) => w.remove('docs', { id })), false);
+    });
+
+    test('a type keyed by its person alone: one row each, found, updated and upserted', async () => {
+      await as(A)((w) => w.put('account', { prefs: { a: 1 } }));
+      await as(B)((w) => w.put('account', { prefs: { b: 1 } }));
+      assert.deepEqual((await as(A)((w) => w.find('account'))).rows, [{ prefs: { a: 1 } }]);
+      assert.equal((await as(A)((w) => w.update('account', {}, { prefs: { a: 2 } }))).status, 'applied');
+      await as(A)((w) => w.put('account', { prefs: { a: 3 } }, { onConflict: 'update' }));
+      assert.deepEqual((await as(A)((w) => w.find('account'))).rows, [{ prefs: { a: 3 } }]);
+      assert.deepEqual((await as(B)((w) => w.find('account'))).rows, [{ prefs: { b: 1 } }]);
     });
 
     test('one person never finds, counts, changes or removes another’s rows', async () => {
@@ -341,6 +352,7 @@ create function ${S}.current_user_id() returns uuid language sql stable as $$ se
 create table ${S}.notes (user_id uuid not null, id uuid not null, primary key (user_id, id));
 create table ${S}.docs (user_id uuid not null default ${S}.current_user_id(), id uuid not null, title text, rank double precision, done boolean, due timestamptz,
   body jsonb, version integer not null default 1, primary key (user_id, id));
+create table ${S}.account (user_id uuid primary key default ${S}.current_user_id(), prefs jsonb);
 create table ${S}.keys (user_id uuid not null default ${S}.current_user_id(), version integer not null, wrapped text not null, primary key (user_id, version));
 create table ${S}.settings (name text primary key, value jsonb not null);
 create table ${S}.invitations (id uuid primary key, code text not null unique, email text not null, redeemed_at timestamptz);
@@ -351,7 +363,7 @@ create table ${S}.engine_audit (id bigint generated always as identity primary k
 grant usage on schema ${S} to se2_int_api, se2_int_sys;
 grant select, insert, update, delete on all tables in schema ${S} to se2_int_api, se2_int_sys;
 grant execute on all functions in schema ${S} to se2_int_api, se2_int_sys;
-${['docs', 'keys']
+${['docs', 'keys', 'account']
   .map((t) => `alter table ${S}.${t} enable row level security; alter table ${S}.${t} force row level security;
 create policy own on ${S}.${t} for all to se2_int_api using (user_id = ${S}.current_user_id()) with check (user_id = ${S}.current_user_id());
 create policy system on ${S}.${t} for all to se2_int_sys using (true) with check (true);`)
