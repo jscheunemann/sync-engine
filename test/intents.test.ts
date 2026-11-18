@@ -36,6 +36,8 @@ const types: Record<string, TypeDecl> = {
   },
   keys: { access: 'person', key: ['version'], fields: { version: 'number', wrapped: 'text' } },
   account: { access: 'person', key: [], fields: { prefs: 'json' } },
+  days: { access: 'person', key: ['day'], fields: { day: 'date', n: 'integer' } },
+  membership: { access: 'person', writes: 'system', key: [], fields: { since: 'date', via: 'text' } },
   settings: { access: 'shared', key: ['name'], fields: { name: 'text', value: 'json' } },
   invitations: { access: 'system', key: ['id'], fields: { id: 'id', code: 'text', email: 'text', redeemed_at: 'time' }, query: ['code', 'redeemed_at'] },
   events: {
@@ -52,6 +54,7 @@ const types: Record<string, TypeDecl> = {
 const system: Record<string, SystemDecl> = {
   invite: { write: ['invitations'] },
   analytics: { write: ['events', 'viewers'], read: ['timed'] },
+  members: { write: ['membership'] },
   owner_report: { read: ['docs', 'settings'] },
   set_signup: { write: ['settings'] },
 };
@@ -182,6 +185,27 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await as(A)((w) => w.put('account', { prefs: { a: 3 } }, { onConflict: 'update' }));
       assert.deepEqual((await as(A)((w) => w.find('account'))).rows, [{ prefs: { a: 3 } }]);
       assert.deepEqual((await as(B)((w) => w.find('account'))).rows, [{ prefs: { b: 1 } }]);
+    });
+
+    test('dates: local days, checked, ordered and compared as days (ADR 0019)', async () => {
+      for (const day of ['2026-11-18', '2026-11-02', '2026-12-01']) await as(A)((w) => w.put('days', { day, n: 1 }));
+      assert.deepEqual((await as(A)((w) => w.find('days', { order: '-day' }))).rows.map((x) => x.day), ['2026-12-01', '2026-11-18', '2026-11-02']);
+      assert.equal(await as(A)((w) => w.count('days', { where: { day: { gte: '2026-11-10' } } })), 2);
+      const [range] = await as(A)((w) => w.summarize('days', { measures: { first: { min: 'day' }, last: { max: 'day' } } }));
+      assert.deepEqual(range, { first: '2026-11-02', last: '2026-12-01' });
+      await code(as(A)((w) => w.put('days', { day: '2026-02-30', n: 1 })), 'bad_value', 'day');
+      await code(as(A)((w) => w.put('days', { day: '2026-11-18T00:00:00Z', n: 1 })), 'bad_value', 'day');
+      assert.equal((await as(A)((w) => w.update('days', { day: '2026-11-18' }, { n: 2 }))).status, 'applied');
+    });
+
+    test('a person type people only read: their own row, written only by a system intent (ADR 0019)', async () => {
+      await code(as(A)((w) => w.put('membership', { since: '2026-01-01', via: 'self' })), 'system_only', 'membership');
+      await sys('members', OWNER)((w) => w.put('membership', { user_id: A, since: '2026-01-01', via: 'invitation' }));
+      assert.deepEqual((await as(A)((w) => w.find('membership'))).rows, [{ since: '2026-01-01', via: 'invitation' }]);
+      assert.deepEqual((await as(B)((w) => w.find('membership'))).rows, []);
+      await code(as(A)((w) => w.update('membership', {}, { via: 'self' })), 'system_only', 'membership');
+      await code(as(A)((w) => w.remove('membership', {})), 'system_only', 'membership');
+      assert.equal((await sys('members', OWNER)((w) => w.update('membership', { user_id: A }, { via: 'existing' }))).status, 'applied');
     });
 
     test('one person never finds, counts, changes or removes another’s rows', async () => {
@@ -368,6 +392,8 @@ create function ${S}.current_user_id() returns uuid language sql stable as $$ se
 create table ${S}.notes (user_id uuid not null, id uuid not null, primary key (user_id, id));
 create table ${S}.docs (user_id uuid not null default ${S}.current_user_id(), id uuid not null, title text, rank double precision, done boolean, due timestamptz,
   body jsonb, version integer not null default 1, primary key (user_id, id));
+create table ${S}.days (user_id uuid not null default ${S}.current_user_id(), day date not null, n integer, primary key (user_id, day));
+create table ${S}.membership (user_id uuid primary key, since date, via text);
 create table ${S}.account (user_id uuid primary key default ${S}.current_user_id(), prefs jsonb);
 create table ${S}.keys (user_id uuid not null default ${S}.current_user_id(), version integer not null, wrapped text not null, primary key (user_id, version));
 create table ${S}.settings (name text primary key, value jsonb not null);
@@ -380,11 +406,15 @@ create table ${S}.engine_audit (id bigint generated always as identity primary k
 grant usage on schema ${S} to se2_int_api, se2_int_sys;
 grant select, insert, update, delete on all tables in schema ${S} to se2_int_api, se2_int_sys;
 grant execute on all functions in schema ${S} to se2_int_api, se2_int_sys;
-${['docs', 'keys', 'account']
+${['docs', 'keys', 'account', 'days']
   .map((t) => `alter table ${S}.${t} enable row level security; alter table ${S}.${t} force row level security;
 create policy own on ${S}.${t} for all to se2_int_api using (user_id = ${S}.current_user_id()) with check (user_id = ${S}.current_user_id());
 create policy system on ${S}.${t} for all to se2_int_sys using (true) with check (true);`)
   .join('\n')}
+alter table ${S}.membership enable row level security; alter table ${S}.membership force row level security;
+create policy own_read on ${S}.membership for select to se2_int_api using (user_id = ${S}.current_user_id());
+create policy system on ${S}.membership for all to se2_int_sys using (true) with check (true);
+revoke insert, update, delete on ${S}.membership from se2_int_api;
 alter table ${S}.settings enable row level security; alter table ${S}.settings force row level security;
 create policy read on ${S}.settings for select to se2_int_api using (true);
 create policy system on ${S}.settings for all to se2_int_sys using (true) with check (true);

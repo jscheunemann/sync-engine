@@ -74,6 +74,7 @@ export function createEngine(opts) {
         columns[name] = {
             table: d.table ?? name,
             ...(d.view ? { view: true } : {}),
+            ...(d.writes === 'system' ? { personReads: true } : {}),
             kinds: { ...(person ? { [person]: 'id' } : {}), ...d.fields },
             key: [...(person ? [person] : []), ...d.key],
             access: d.access,
@@ -164,6 +165,8 @@ function checkTypes(types) {
         // elsewhere (another schema): the backend checks that, since only it knows where tables are.
         if (ENGINE_TABLES.includes(name))
             throw new EngineError('engine_table', name);
+        if (d.writes !== undefined && (d.writes !== 'system' || d.access !== 'person'))
+            throw new EngineError('bad_writes', name);
         for (const k of [...d.key, ...(d.query ?? []), ...(d.sealed ?? []), ...(d.version ? [d.version] : [])])
             if (!d.fields[k])
                 throw new EngineError('undeclared_field', `${name}.${k}`);
@@ -250,6 +253,8 @@ class Core {
                 throw new EngineError('system_only', sh.name);
             return null;
         }
+        if (write && sh.decl?.writes === 'system')
+            throw new EngineError('system_only', sh.name);
         return this.person;
     }
     async audit(sh, action, rows) {
@@ -418,7 +423,8 @@ class Core {
         return c;
     }
     keyMatch(sh, key, person) {
-        const names = Object.keys(key);
+        // A system unit names the person of a person type's row in its key; a person unit's person is its own.
+        const names = Object.keys(key).filter((k) => !(sh.access === 'person' && person === null && k === sh.personColumn));
         if (names.length !== sh.key.length || !sh.key.every((k) => names.includes(k)))
             throw new EngineError('bad_key', sh.name);
         const m = sh.key.map((k) => {

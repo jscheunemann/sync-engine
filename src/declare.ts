@@ -8,10 +8,10 @@ import type { Cond, Row } from './backend.ts';
  * The kind of a field: what values it takes, how it's stored, and how it comes back (times as ISO strings, numbers as
  * numbers). `ids` is a list of ids; `json` any JSON value. The engine picks each kind's column type (part 4, ADR 0014).
  */
-export type Kind = 'text' | 'number' | 'integer' | 'boolean' | 'time' | 'id' | 'ids' | 'json';
+export type Kind = 'text' | 'number' | 'integer' | 'boolean' | 'time' | 'date' | 'id' | 'ids' | 'json';
 
 /** Kinds a find may filter and order by (not lists or JSON). */
-export const QUERYABLE: readonly Kind[] = ['text', 'number', 'integer', 'boolean', 'time', 'id'];
+export const QUERYABLE: readonly Kind[] = ['text', 'number', 'integer', 'boolean', 'time', 'date', 'id'];
 
 /** A type that isn't synced from devices (ADR 0003): written by the app's server, read through find. */
 export interface TypeDecl {
@@ -29,6 +29,11 @@ export interface TypeDecl {
    * there with the declared columns and never makes it.
    */
   view?: true;
+  /**
+   * `system` on a person type (ADR 0019): each person reads their own rows, but only system intents write them (a
+   * membership, an owner flag). Default: a person writes their own.
+   */
+  writes?: 'system';
   /** The column naming a row's person (`person` types; default `user_id`). */
   personColumn?: string;
   /** The key, without the person column: `['id']`, `['version']`, or `[]` for one row per person. */
@@ -126,6 +131,9 @@ export function fits(kind: Kind, v: unknown): boolean {
       return Array.isArray(v) && v.length <= 10000 && v.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 200 && !/[{},"\\\s]/.test(x));
     case 'boolean':
       return typeof v === 'boolean';
+    case 'date':
+      // A local calendar day (ADR 0019): `YYYY-MM-DD`, a real one.
+      return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v);
     case 'time':
       return (typeof v === 'string' && !Number.isNaN(Date.parse(v))) || (v instanceof Date && !Number.isNaN(v.getTime()));
     case 'json':
@@ -137,6 +145,8 @@ export function fits(kind: Kind, v: unknown): boolean {
 export function out(kind: Kind, v: unknown): unknown {
   if (v === null || v === undefined) return null;
   if (kind === 'time') return new Date(v as string).toISOString();
+  // A driver may hand a date column back as a Date at UTC midnight; the day is its first ten characters either way.
+  if (kind === 'date') return (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10);
   if (kind === 'number' || kind === 'integer') return Number(v);
   if (kind === 'ids') return idList(v);
   if (kind === 'id') return String(v);
