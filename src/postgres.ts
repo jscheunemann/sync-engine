@@ -29,10 +29,24 @@ export interface PostgresSettings {
 }
 
 
-// The driver's own types stay inside this file: nothing here is exported with them.
-type Sql = pg.Sql;
-type Tx = pg.TransactionSql;
-type Frag = pg.PendingQuery<pg.Row[]>;
+// The driver, as this file uses it: the calls Postgres.js 3 and 4 both have, typed here rather than with the driver's
+// own types (which moved between majors), so the backend builds and runs on either. Nothing here is exported.
+/** A query: awaited for its rows, or put inside another query as a fragment. */
+type Frag = Promise<Row[]>;
+interface Tx {
+  (strings: TemplateStringsArray, ...values: unknown[]): Frag;
+  /** An identifier (a name), a list of values for `in`, or the columns and values of a row for insert and update. */
+  (value: unknown, ...columns: string[]): Frag;
+  json(value: unknown): unknown;
+  savepoint?<R>(fn: (sp: Tx) => Promise<R>): Promise<R>;
+  begin<R>(fn: (tx: Tx) => Promise<R>): Promise<R>;
+}
+interface Sql extends Tx {
+  end(): Promise<void>;
+}
+
+/** A savepoint: `savepoint` on Postgres.js 3; on 4 a nested `begin` is one, and `savepoint` is kept as long as it is. */
+const savepoint = <R>(tx: Tx, fn: (sp: Tx) => Promise<R>): Promise<R> => (tx.savepoint ? tx.savepoint(fn) : tx.begin(fn));
 
 const REF = '23503';
 
@@ -135,7 +149,7 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
   const u: Unit = {
     savepoint: async (fn) => {
       try {
-        return (await tx.savepoint((sp: Tx) => fn(unit(sp, layout, person)))) as never;
+        return await savepoint(tx, (sp) => fn(unit(sp, layout, person)));
       } catch (e) {
         throw rule(e);
       }
@@ -276,8 +290,9 @@ function unit(tx: Tx, layout: Layout, person: string | null): Unit {
     remove: async (name, match) => {
       const t = declared(name);
       try {
-        const r = await tx`delete from ${t} where ${and(tx, match.map((m) => cond(tx, m)))}`;
-        return r.count;
+        // Counted from what came back: the result's `count` isn't promised on every driver version.
+        const r = await tx`delete from ${t} where ${and(tx, match.map((m) => cond(tx, m)))} returning 1 as gone`;
+        return r.length;
       } catch (e) {
         throw rule(e);
       }
@@ -294,14 +309,14 @@ export const postgres: Backend<PostgresSettings> = {
   kind: 'postgres',
   connect(settings: PostgresSettings, layout: Layout): Connection {
     if (!settings?.url) throw new Error('no_database');
-    const sql: Sql = pg(settings.url, {
+    const sql = pg(settings.url, {
       max: settings.max ?? 5,
       fetch_types: false, // no extra round trip on connect; the engine uses only built-in types
       prepare: true,
       connect_timeout: 10,
       idle_timeout: 5,
       onnotice: () => {},
-    });
+    }) as unknown as Sql;
     const personSetting = settings.personSetting ?? 'app.user_id';
     return {
       unit: <R>(scope: Scope, fn: (u: Unit) => Promise<R>) => {

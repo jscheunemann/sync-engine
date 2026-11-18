@@ -304,7 +304,7 @@ create policy system on ${S}.settings for all to se2_int_sys using (true) with c
 revoke all on ${S}.invitations, ${S}.engine_audit from se2_int_api;
 `;
 
-let admin: pg.Sql | undefined;
+let admin: ReturnType<typeof pg> | undefined;
 let pgSession: Session<T> | undefined;
 const S = 'se2_int';
 contract(

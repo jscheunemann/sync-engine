@@ -102,7 +102,7 @@ const rec = (r: unknown) => (r as { record: StoredRecord }).record;
 
 describe('contract: Postgres, through the engine, row-level security on', { skip: !URL_ && 'TEST_DATABASE_URL not set' }, () => {
   const S = 'se2_test';
-  let admin: pg.Sql;
+  let admin: ReturnType<typeof pg>;
   let session: Session<T>;
   let h: ReturnType<typeof harness>;
   const A = uuidv7(), B = uuidv7();
@@ -320,7 +320,7 @@ describe('contract: Postgres, through the engine, row-level security on', { skip
 
 describe('contract: isolation by the engine alone (row-level security off)', { skip: !URL_ && 'TEST_DATABASE_URL not set' }, () => {
   const S = 'se2_open';
-  let admin: pg.Sql;
+  let admin: ReturnType<typeof pg>;
   let session: Session<T>;
   let h: ReturnType<typeof harness>;
   const A = uuidv7(), B = uuidv7();
