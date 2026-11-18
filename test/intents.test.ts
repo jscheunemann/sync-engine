@@ -292,11 +292,12 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
 
     test('errors carry a code and a field, never a value', async () => {
       const values = ['private text 1', 'someone-else@example.com'];
-      for (const p of [
-        as(A)((w) => w.put('docs', { id: uuidv7(), title: 123 as never, body: values[0] })),
-        as(A)((w) => w.find('docs', { where: { title: { in: [values[1], 4] } } })),
+      // One at a time: a refusal started early would go unhandled while the one before it is awaited.
+      for (const run of [
+        () => as(A)((w) => w.put('docs', { id: uuidv7(), title: 123 as never, body: values[0] })),
+        () => as(A)((w) => w.find('docs', { where: { title: { in: [values[1], 4] } } })),
       ])
-        await assert.rejects(p, (e: Error) => values.every((v) => !e.message.includes(v)));
+        await assert.rejects(run(), (e: Error) => values.every((v) => !e.message.includes(v)));
     });
   });
 }

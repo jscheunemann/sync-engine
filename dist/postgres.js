@@ -309,9 +309,11 @@ function unit(tx, layout, schema, person) {
         summarize: async (q) => {
             const t = declared(q.table);
             const cs = colsOf(q.table);
-            const sel = [];
-            for (const g of q.by)
-                sel.push('col' in g ? tx `${ref(tx, cs, g.col)} as ${tx(g.as)}` : tx `((${tx(g.day)} at time zone ${g.zone})::date)::text as ${tx(g.as)}`);
+            // The groups are worked out in a subquery and grouped by name there: grouping by position would go to the
+            // driver as a parameter, and an expression with a parameter in it (a time zone) can't be matched to itself.
+            const inner = [tx `*`];
+            q.by.forEach((g, i) => inner.push('col' in g ? tx `${ref(tx, cs, g.col)} as ${tx(`__g${i}`)}` : tx `((${tx(g.day)} at time zone ${g.zone})::date)::text as ${tx(`__g${i}`)}`));
+            const sel = q.by.map((g, i) => tx `${tx(`__g${i}`)} as ${tx(g.as)}`);
             for (const m of q.measures) {
                 const e = m.col !== undefined ? ref(tx, cs, m.col) : tx ``;
                 const agg = m.fn === 'count' ? tx `count(*)`
@@ -321,9 +323,10 @@ function unit(tx, layout, schema, person) {
                 sel.push(m.where.length ? tx `${agg} filter (where ${and(tx, m.where.map((c) => cond(tx, c, cs)))}) as ${tx(m.as)}` : tx `${agg} as ${tx(m.as)}`);
             }
             const where = filter(tx, { table: q.table, person: q.person, personColumn: q.personColumn, where: q.where, key: [] }, cs);
-            const group = q.by.length ? tx `group by ${q.by.map((_, i) => tx `${i + 1}`).reduce((a, b) => tx `${a}, ${b}`)}` : tx ``;
+            const join = (fs) => fs.reduce((a, b) => tx `${a}, ${b}`);
+            const group = q.by.length ? tx `group by ${join(q.by.map((_, i) => tx `${tx(`__g${i}`)}`))}` : tx ``;
             const order = q.order ? tx `order by ${tx(q.order.as)} ${q.order.desc ? tx `desc` : tx `asc`} nulls last` : tx ``;
-            return (await tx `select ${sel.reduce((a, b) => tx `${a}, ${b}`)} from ${t} where ${where} ${group} ${order} limit ${q.limit}`);
+            return (await tx `select ${join(sel)} from (select ${join(inner)} from ${t} where ${where}) as s ${group} ${order} limit ${q.limit}`);
         },
         lock: async (name) => {
             await tx `select pg_advisory_xact_lock(hashtext(${`${schema}:${name}`}))`;
