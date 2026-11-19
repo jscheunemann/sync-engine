@@ -171,7 +171,7 @@ export function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o:
         }
       if (live) {
         if (t.access !== 'system') grant(o.role, ['select'], schema, table);
-        grant(o.systemRole, ['select'], schema, table);
+        grant(o.systemRole, t.view === true ? ['select'] : ['select', 'delete'], schema, table);
       }
       continue;
     }

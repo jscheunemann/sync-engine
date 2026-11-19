@@ -73,7 +73,7 @@ export function createEngine(opts) {
         const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
         columns[name] = {
             table: d.table ?? name,
-            ...(d.view ? { view: true } : {}),
+            ...(d.view ? { view: d.view === true ? true : { remove: true } } : {}),
             ...(d.writes === 'system' ? { personReads: true } : {}),
             kinds: { ...(person ? { [person]: 'id' } : {}), ...d.fields },
             key: [...(person ? [person] : []), ...d.key],
@@ -167,6 +167,8 @@ function checkTypes(types) {
             throw new EngineError('engine_table', name);
         if (d.writes !== undefined && (d.writes !== 'system' || d.access !== 'person'))
             throw new EngineError('bad_writes', name);
+        if (d.view !== undefined && d.view !== true && !(typeof d.view === 'object' && d.view.remove === true && d.access === 'system'))
+            throw new EngineError('bad_view', name);
         for (const k of [...d.key, ...(d.query ?? []), ...(d.sealed ?? []), ...(d.version ? [d.version] : [])])
             if (!d.fields[k])
                 throw new EngineError('undeclared_field', `${name}.${k}`);
@@ -399,11 +401,11 @@ class Core {
         });
     }
     /** A declared type, for a write: records are written only through apply. */
-    writable(type) {
+    writable(type, op) {
         const sh = this.shape(type);
         if (sh.record)
             throw new EngineError('records_use_apply', type);
-        if (sh.decl?.view)
+        if (sh.decl?.view && !(op === 'remove' && sh.decl.view !== true && sh.decl.view.remove))
             throw new EngineError('read_only', type);
         return { sh, person: this.allow(sh, true) };
     }
@@ -446,7 +448,7 @@ class Core {
         throw e;
     }
     async put(type, given, opts = {}) {
-        const { sh, person } = this.writable(type);
+        const { sh, person } = this.writable(type, 'put');
         const row = { ...given };
         let who = person;
         if (sh.access === 'person') {
@@ -477,7 +479,7 @@ class Core {
         }
     }
     async update(type, key, changes, version) {
-        const { sh, person } = this.writable(type);
+        const { sh, person } = this.writable(type, 'update');
         const match = this.keyMatch(sh, key, person);
         const keyRow = Object.fromEntries(sh.key.map((k) => [k, key[k]]));
         for (const k of [...sh.key, sh.personColumn])
@@ -508,7 +510,7 @@ class Core {
         return current ? { status: 'conflict', current: await this.outRow(sh, current) } : { status: 'not_found' };
     }
     async remove(type, key) {
-        const { sh, person } = this.writable(type);
+        const { sh, person } = this.writable(type, 'remove');
         const match = this.keyMatch(sh, key, person);
         let n;
         try {
