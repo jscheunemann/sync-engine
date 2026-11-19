@@ -32,3 +32,4 @@ connection to the layer that owns all of an app's data access.
 | [0020](0020-views-system-intents-may-remove-from.md) | Views system intents may remove rows from | Accepted |
 | [0021](0021-adopted-tables-keep-their-force-setting.md) | Adopted tables keep their own force setting | Accepted |
 | [0022](0022-erase-one-person.md) | Erase one person | Accepted |
+| [0023](0023-remove-where.md) | Remove every matching row of a system type | Accepted |

@@ -152,6 +152,11 @@ export interface Work<T extends string = string> extends Reader<T> {
     update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult>;
     /** Removes the row with this key; returns whether there was one. */
     remove(type: string, key: Row): Promise<boolean>;
+    /**
+     * Removes every row of a system type that matches (ADR 0023), in a system unit whose intent writes the type: one
+     * statement and one audit line, however many rows. `where` must name at least one field. Returns the rows removed.
+     */
+    removeWhere(type: string, where: Where): Promise<number>;
 }
 /** A request's session: one connection, any number of units of work. */
 export interface Session<T extends string = string> {
