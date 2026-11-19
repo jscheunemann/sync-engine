@@ -161,6 +161,12 @@ export interface Work<T extends string = string> extends Reader<T> {
   put(type: string, row: Row, opts?: { onConflict?: 'update' | 'nothing' }): Promise<Row | null>;
   /** Holds a named lock until the unit ends, so two units doing the same thing go one after the other. */
   lock(name: string): Promise<void>;
+  /**
+   * Erases one person (ADR 0022), in a system unit whose intent declares `erase`: every row of theirs in the record
+   * types, the engine's own tables, and the person types the intent writes, except those in `keep`. Returns the rows
+   * removed by type. Can't be undone.
+   */
+  erase(person: string, opts?: { keep?: readonly string[] }): Promise<Record<string, number>>;
   /** Changes the row with this key; with a `version` column, only if `version` is still current. */
   update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult>;
   /** Removes the row with this key; returns whether there was one. */
@@ -398,7 +404,7 @@ class Core<T extends string> {
     return this.person;
   }
 
-  private async audit(sh: Shape, action: 'get' | 'find' | 'count' | 'summarize' | 'put' | 'update' | 'remove', rows: number): Promise<void> {
+  private async audit(sh: Shape, action: 'get' | 'find' | 'count' | 'summarize' | 'put' | 'update' | 'remove' | 'erase', rows: number): Promise<void> {
     if (this.intent) await this.u.audit({ intent: this.intent.name, by: this.intent.by, type: sh.name, action, rows });
   }
 
@@ -519,6 +525,19 @@ class Core<T extends string> {
       }
       return o;
     });
+  }
+
+  private async erase(person: string, keep: readonly string[]): Promise<Record<string, number>> {
+    if (!this.intent) throw new EngineError('system_only', 'erase');
+    if (!this.intent.decl.erase) throw new EngineError('not_permitted', 'erase');
+    if (typeof person !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(person)) throw new EngineError('bad_value', 'person');
+    for (const k of keep) if (!this.types[k] && !this.store.isType(k)) throw new EngineError('unknown_type', k);
+    const declared = (this.intent.decl.write ?? []).filter((t) => this.types[t]?.access === 'person' && !this.types[t]?.view);
+    const types = [...this.store.types, ...declared].filter((t) => !keep.includes(t));
+    const removed = await this.u.erase(person.toLowerCase(), types);
+    const total = Object.values(removed).reduce((a, n) => a + n, 0);
+    await this.u.audit({ intent: this.intent.name, by: this.intent.by, type: '*', action: 'erase', rows: total });
+    return removed;
   }
 
   /** A declared type, for a write: records are written only through apply. */
@@ -659,6 +678,7 @@ class Core<T extends string> {
       changes: (since, limit) => (p(), this.changes(since, limit)),
       prefs: { get: () => (p(), this.getPrefs()), put: (data, base) => (p(), this.putPrefs(data, base)) },
       put: (type, row, opts) => this.put(type, row, opts),
+      erase: (person, opts) => this.erase(person, opts?.keep ?? []),
       lock: async (name) => {
         if (typeof name !== 'string' || !name || name.length > 200) throw new EngineError('bad_lock');
         await this.u.lock(name);

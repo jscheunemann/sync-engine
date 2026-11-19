@@ -140,6 +140,14 @@ export interface Work<T extends string = string> extends Reader<T> {
     }): Promise<Row | null>;
     /** Holds a named lock until the unit ends, so two units doing the same thing go one after the other. */
     lock(name: string): Promise<void>;
+    /**
+     * Erases one person (ADR 0022), in a system unit whose intent declares `erase`: every row of theirs in the record
+     * types, the engine's own tables, and the person types the intent writes, except those in `keep`. Returns the rows
+     * removed by type. Can't be undone.
+     */
+    erase(person: string, opts?: {
+        keep?: readonly string[];
+    }): Promise<Record<string, number>>;
     /** Changes the row with this key; with a `version` column, only if `version` is still current. */
     update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult>;
     /** Removes the row with this key; returns whether there was one. */

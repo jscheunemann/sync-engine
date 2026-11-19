@@ -59,6 +59,11 @@ export interface TypeDecl {
 export interface SystemDecl {
   read?: readonly string[];
   write?: readonly string[];
+  /**
+   * May erase one person (ADR 0022): every row of theirs in the record types, the engine's own tables, and the person
+   * types this intent writes. For deleting an account, without the database cascading from someone else's table.
+   */
+  erase?: true;
 }
 
 /** A condition on one field: a value (equals), or one operator. */

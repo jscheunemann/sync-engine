@@ -57,6 +57,7 @@ const system: Record<string, SystemDecl> = {
   invite: { write: ['invitations'] },
   analytics: { write: ['events', 'viewers'], read: ['timed'] },
   account_delete: { write: ['accounts'] },
+  erase_person: { erase: true, write: ['docs', 'keys', 'days', 'account', 'membership'] },
   members: { write: ['membership'] },
   owner_report: { read: ['docs', 'settings'] },
   set_signup: { write: ['settings'] },
@@ -340,6 +341,30 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await code(as(A)((w) => w.find('accounts')), 'system_only', 'accounts');
     });
 
+    test('erase: every row of one person, by a system intent that declares it, keeping what it says (ADR 0022)', async () => {
+      const Z = uuidv7(), Y = uuidv7();
+      for (const p of [Z, Y]) {
+        await as(p)((w) => w.put('docs', { id: uuidv7(), title: 'mine' }));
+        await as(p)((w) => w.put('keys', { version: 1, wrapped: 'k' }));
+        await as(p)((w) => w.put('days', { day: '2026-11-18', n: 1 }));
+        await as(p)((w) => w.put('account', { prefs: { a: 1 } }));
+        await sys('members')((w) => w.put('membership', { user_id: p, since: '2026-01-01', via: 'invitation' }));
+      }
+      await code(as(Z)((w) => w.erase(Z)), 'system_only', 'erase');
+      await code(sys('members')((w) => w.erase(Z)), 'not_permitted', 'erase');
+      await code(sys('erase_person')((w) => w.erase('not-a-person')), 'bad_value', 'person');
+      const removed = await sys('erase_person', OWNER)((w) => w.erase(Z, { keep: ['membership'] }));
+      assert.deepEqual([removed.docs, removed.keys, removed.days, removed.account], [1, 1, 1, 1]);
+      assert.equal(removed.membership, undefined, 'kept');
+      for (const t of ['docs', 'keys', 'days', 'account'] as const) {
+        assert.equal(await as(Z)((w) => w.count(t)), 0, `${t}: Z's gone`);
+        assert.equal(await as(Y)((w) => w.count(t)), 1, `${t}: Y's untouched`);
+      }
+      assert.equal((await as(Z)((w) => w.find('membership'))).rows.length, 1, 'membership kept');
+      const log = await r.audit();
+      assert.ok(log.some((x) => x.intent === 'erase_person' && x.action === 'erase' && Number(x.rows) >= 4));
+    });
+
     test('put on a taken key: update, or leave it; a lock holds for the unit', async () => {
       const first = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', first_seen: '2026-11-01T00:00:00.000Z', last_seen: '2026-11-01T00:00:00.000Z', os: 'ios' }));
       assert.equal(first!.os, 'ios');
@@ -412,6 +437,9 @@ drop schema if exists ${S} cascade;
 create schema ${S};
 create function ${S}.current_user_id() returns uuid language sql stable as $$ select nullif(current_setting('app.user_id', true), '')::uuid $$;
 create table ${S}.notes (user_id uuid not null, id uuid not null, primary key (user_id, id));
+create table ${S}.counters (user_id uuid primary key, rev bigint not null default 0, purged_rev bigint not null default 0);
+create table ${S}.applied_ops (user_id uuid not null, op_id uuid not null, result jsonb not null, created_at timestamptz not null default now(), primary key (user_id, op_id));
+create table ${S}.prefs (user_id uuid primary key, data jsonb not null default '{}', version integer not null default 1, updated_at timestamptz not null default now());
 create table ${S}.docs (user_id uuid not null default ${S}.current_user_id(), id uuid not null, title text, rank double precision, done boolean, due timestamptz,
   body jsonb, version integer not null default 1, primary key (user_id, id));
 create table ${S}.days (user_id uuid not null default ${S}.current_user_id(), day date not null, n integer, primary key (user_id, day));
