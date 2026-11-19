@@ -346,6 +346,26 @@ function unit(tx, layout, settings, person) {
         lock: async (name) => {
             await tx `select pg_advisory_xact_lock(hashtext(${`${schema}:${name}`}))`;
         },
+        erase: async (p, types) => {
+            const out = {};
+            const del = async (key, t, col) => {
+                try {
+                    out[key] = (await tx `delete from ${t} where ${tx(col)} = ${p} returning 1 as gone`).length;
+                }
+                catch (e) {
+                    throw rule(e);
+                }
+            };
+            for (const type of types) {
+                const c = layout.columns?.[type];
+                if (!layout.types.includes(type) && !(c && c.person))
+                    throw new Error('unknown_table');
+                await del(type, typeTable(type), c?.person ?? 'user_id');
+            }
+            for (const t of ['applied_ops', 'prefs', 'counters'])
+                await del(t, table(t), 'user_id');
+            return out;
+        },
         audit: async (a) => {
             await tx `insert into ${table('engine_audit')} (intent, by_person, type, action, rows) values (${a.intent}, ${a.by}, ${a.type}, ${a.action}, ${a.rows})`;
         },

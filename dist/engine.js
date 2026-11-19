@@ -405,6 +405,23 @@ class Core {
             return o;
         });
     }
+    async erase(person, keep) {
+        if (!this.intent)
+            throw new EngineError('system_only', 'erase');
+        if (!this.intent.decl.erase)
+            throw new EngineError('not_permitted', 'erase');
+        if (typeof person !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(person))
+            throw new EngineError('bad_value', 'person');
+        for (const k of keep)
+            if (!this.types[k] && !this.store.isType(k))
+                throw new EngineError('unknown_type', k);
+        const declared = (this.intent.decl.write ?? []).filter((t) => this.types[t]?.access === 'person' && !this.types[t]?.view);
+        const types = [...this.store.types, ...declared].filter((t) => !keep.includes(t));
+        const removed = await this.u.erase(person.toLowerCase(), types);
+        const total = Object.values(removed).reduce((a, n) => a + n, 0);
+        await this.u.audit({ intent: this.intent.name, by: this.intent.by, type: '*', action: 'erase', rows: total });
+        return removed;
+    }
     /** A declared type, for a write: records are written only through apply. */
     writable(type, op) {
         const sh = this.shape(type);
@@ -561,6 +578,7 @@ class Core {
             changes: (since, limit) => (p(), this.changes(since, limit)),
             prefs: { get: () => (p(), this.getPrefs()), put: (data, base) => (p(), this.putPrefs(data, base)) },
             put: (type, row, opts) => this.put(type, row, opts),
+            erase: (person, opts) => this.erase(person, opts?.keep ?? []),
             lock: async (name) => {
                 if (typeof name !== 'string' || !name || name.length > 200)
                     throw new EngineError('bad_lock');

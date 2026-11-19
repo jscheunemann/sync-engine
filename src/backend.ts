@@ -127,7 +127,7 @@ export interface AuditEntry {
   intent: string;
   by: string | null;
   type: string;
-  action: 'get' | 'find' | 'count' | 'summarize' | 'put' | 'update' | 'remove';
+  action: 'get' | 'find' | 'count' | 'summarize' | 'put' | 'update' | 'remove' | 'erase';
   rows: number;
 }
 
@@ -179,6 +179,11 @@ export interface Unit {
   summarize(q: SummaryQuery): Promise<Row[]>;
   /** Holds a named lock until the unit ends: another unit asking for the same name waits. */
   lock(name: string): Promise<void>;
+  /**
+   * Deletes every row of one person: in these record types and person types (by type name: user_id for records, each
+   * type's person column for declared ones) and in the engine's own tables. Returns the rows removed, by type.
+   */
+  erase(person: string, types: readonly string[]): Promise<Record<string, number>>;
   /** Changes the row matching `match` (all conditions); returns it as stored, or null when none matches. */
   update(table: string, match: readonly Cond[], cols: Row): Promise<Row | null>;
   /** Removes the rows matching `match`; returns how many. */

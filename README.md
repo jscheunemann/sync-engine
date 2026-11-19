@@ -120,6 +120,7 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 - A type can be a view the app's migrations define (`view: true`): read like any type, never written (ADR 0018).
 - Postgres keeps tables in `schema`, or per type in `schemas: { type: schema }` for tables adopted elsewhere (ADR 0017).
 - `w.put(type, row, { onConflict: 'update' | 'nothing' })` for insert-or-update; `w.lock(name)` for the rest of the unit.
+- `w.erase(person, { keep })` in a system unit whose intent declares `erase: true`: every row of one person (ADR 0022).
 - Refusals are `EngineError`s: a code and a field, never a value.
 
 ## Using it

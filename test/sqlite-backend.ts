@@ -348,6 +348,15 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
     },
     summarize: async (sq) => summarize(sq),
     lock: async () => {}, // one writer at a time already
+    erase: async (p, types) => {
+      const out: Record<string, number> = {};
+      for (const type of types) {
+        const c = layout.columns?.[type];
+        out[type] = all(type, `delete from ${declared(type)} where ${q(c?.person ?? 'user_id')} = ? returning 1 as gone`, [p]).length;
+      }
+      for (const t of ['applied_ops', 'prefs', 'counters']) out[t] = all(t, `delete from ${t} where user_id = ? returning 1 as gone`, [p]).length;
+      return out;
+    },
     update: async (table, match, changes) => {
       const w = where(table, match);
       if (!Object.keys(changes).length) return one(table, `select * from ${declared(table)} where ${w.sql}`, w.params);
