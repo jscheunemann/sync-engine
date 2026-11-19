@@ -48,7 +48,7 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 
 ## Version 2: the engine owns data access
 
-Version 2.0.0 (ADR 0011). Install with `github:jscheunemann/sync-engine#v2.4.1`. Version 1's `./server` is still in the
+Version 2.0.0 (ADR 0011). Install with `github:jscheunemann/sync-engine#v2.4.2`. Version 1's `./server` is still in the
 package, unchanged, for apps that haven't moved yet.
 
 Following `docs/adr/` 0002 to 0016, an app gives the engine connection settings and intents; the engine owns the
