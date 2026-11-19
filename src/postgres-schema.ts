@@ -160,6 +160,13 @@ export function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o:
   grant(o.role, ['execute'], main, 'fn:next_rev');
   grant(o.systemRole, ['insert'], main, 'engine_audit');
   grant(o.systemRole, ['execute'], main, 'fn:current_user_id');
+  // Erasing a person (ADR 0022): the system role deletes from the engine's own tables, and from the record tables below.
+  if (layout.erase && o.systemRole)
+    for (const name of ['counters', 'applied_ops', 'prefs']) {
+      grant(o.systemRole, ['select', 'delete'], main, name);
+      policy(main, name, 'engine_system_erase', `for delete to ${q(o.systemRole)} using (true)`);
+      policy(main, name, 'engine_system_read', `for select to ${q(o.systemRole)} using (true)`);
+    }
 
   for (const [type, t] of Object.entries(types)) {
     const { schema, table } = placeOf(type);
@@ -211,7 +218,7 @@ export function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o:
       if (o.role) policy(schema, table, 'engine_read', `for select to ${q(o.role)} using (true)`);
     }
     // A system intent may read records (find, count) and read and write its declared types.
-    grant(o.systemRole, t.access === 'record' ? ['select'] : all, schema, table);
+    grant(o.systemRole, t.access === 'record' ? (layout.erase ? ['select', 'delete'] : ['select']) : all, schema, table);
     if (o.systemRole) policy(schema, table, 'engine_system', `for all to ${q(o.systemRole)} using (true) with check (true)`);
   }
   return { steps, conflicts };

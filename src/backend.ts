@@ -42,6 +42,8 @@ export interface Layout {
    * fields. Units name types; the backend finds each type's table (and, by its settings, where the table is).
    */
   readonly columns?: Readonly<Record<string, TableLayout>>;
+  /** Some system intent may erase a person (ADR 0022): the system role then needs delete on what erase reaches. */
+  readonly erase?: boolean;
 }
 
 /** One table, as the backend needs it to write values by kind and to make or adopt the table (ADR 0014). */
