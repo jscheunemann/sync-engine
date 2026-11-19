@@ -30,3 +30,4 @@ connection to the layer that owns all of an app's data access.
 | [0018](0018-views-are-read-only-types.md) | Views the app defines are read-only types | Accepted |
 | [0019](0019-dates-and-person-types-people-only-read.md) | Dates, and person types people only read | Accepted |
 | [0020](0020-views-system-intents-may-remove-from.md) | Views system intents may remove rows from | Accepted |
+| [0021](0021-adopted-tables-keep-their-force-setting.md) | Adopted tables keep their own force setting | Accepted |

@@ -119,10 +119,15 @@ export function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o:
     const target = obj.startsWith('fn:') ? `function ${q(schema)}.${q(obj.slice(3))}()` : at(schema, obj);
     step(`Grant ${role} ${missing.join(', ')} on ${schema}.${obj.replace(/^fn:/, '')}`, `grant ${missing.join(', ')} on ${target} to ${q(role)};`);
   };
+  // Row-level security is turned on wherever it's off. It's forced on tables the plan makes; on a table that's already
+  // there, forcing is the app's own choice and is left as it is (ADR 0021): an app may leave it off so that what runs
+  // as the table's owner (a trigger, a hook another service calls) sees every row. The engine never connects as an
+  // owner, so forcing adds nothing to its own isolation.
   const rlsOn = (schema: string, table: string) => {
     const r = cat(schema).rls[table];
+    const made = !cat(schema).columns[table];
     if (!r?.enabled) step(`Turn on row-level security for ${schema}.${table}`, `alter table ${at(schema, table)} enable row level security;`);
-    if (!r?.forced) step(`Force row-level security for ${schema}.${table}`, `alter table ${at(schema, table)} force row level security;`);
+    if (made && !r?.forced) step(`Force row-level security for ${schema}.${table}`, `alter table ${at(schema, table)} force row level security;`);
   };
   const policy = (schema: string, table: string, pname: string, body: string) => {
     if (!(cat(schema).policies[table] ?? []).includes(pname)) step(`Policy ${pname} on ${schema}.${table}`, `create policy ${q(pname)} on ${at(schema, table)} ${body};`);

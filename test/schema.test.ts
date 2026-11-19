@@ -123,6 +123,17 @@ describe('the plan', () => {
     assert.match(p2.steps.map((x) => x.sql).join('\n'), /grant select, delete on "app"\."accounts" to "app_sys";/);
   });
 
+  test('an existing table keeps its own force setting; one the plan makes is forced (ADR 0021)', () => {
+    const have: Catalog = { ...NONE, schema: true, columns: { settings: { name: 'text', value: 'jsonb' } }, rls: { settings: { enabled: true, forced: false } } };
+    const sql = plan(layoutOf(), { app: have }, opts).steps.map((x) => x.sql).join('\n');
+    assert.doesNotMatch(sql, /"settings" force row level security/, 'left as the app set it');
+    assert.match(sql, /"keys" enable row level security;\n.*"keys" force row level security;/, 'made here: forced');
+    const off: Catalog = { ...have, rls: {} };
+    const sql2 = plan(layoutOf(), { app: off }, opts).steps.map((x) => x.sql).join('\n');
+    assert.match(sql2, /"settings" enable row level security;/);
+    assert.doesNotMatch(sql2, /"settings" force row level security/);
+  });
+
   test('nothing to do when everything is there', () => {
     const p1 = plan(layoutOf(), none, opts);
     // What applying p1 leaves: every table and column, function, index, policy and grant it made.
