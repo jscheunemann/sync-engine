@@ -115,6 +115,12 @@ describe('the plan', () => {
     assert.doesNotMatch(sql, /grant [a-z, ]*(insert|update|delete)[a-z, ]* on "app"\."members" to "app_api"/);
     assert.match(sql, /create policy "engine_person_read" on "app"\."members" for select to "app_api" using \("user_id" = "app"\.current_user_id\(\)\);/);
     assert.throws(() => createEngine({ store, backend: spy, types: { x: { access: 'shared', writes: 'system', key: [], fields: {} } } }), /bad_writes/);
+    assert.throws(() => createEngine({ store, backend: spy, types: { x: { access: 'person', view: { remove: true }, key: ['id'], fields: { id: 'id' } } } }), /bad_view/);
+    let l2: unknown;
+    const spy2 = { kind: 'spy', connect: (_s: unknown, l: unknown) => ((l2 = l), { unit: async () => undefined as never, close: async () => {} }) };
+    createEngine({ store, backend: spy2, types: { accounts: { access: 'system', view: { remove: true }, key: ['id'], fields: { id: 'id', email: 'text' } } } }).connect({});
+    const p2 = plan(l2 as Parameters<typeof plan>[0], { app: { ...NONE, schema: true, columns: { accounts: { id: 'uuid', email: 'text' } } } }, opts);
+    assert.match(p2.steps.map((x) => x.sql).join('\n'), /grant select, delete on "app"\."accounts" to "app_sys";/);
   });
 
   test('nothing to do when everything is there', () => {

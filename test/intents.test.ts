@@ -48,12 +48,15 @@ const types: Record<string, TypeDecl> = {
     paths: { name: { from: 'e', path: ['name'], kind: 'text' }, dur: { from: 'e', path: ['dur'], kind: 'number' }, test: { from: 'e', path: ['test'], kind: 'boolean' } },
   },
   // A view the app's migrations make: today's events with a duration, read like any type.
+  // An updatable view a system intent may remove rows through (ADR 0020), as an app's over Auth's users.
+  accounts: { access: 'system', view: { remove: true }, key: ['id'], fields: { id: 'id', email: 'text' }, query: ['email'] },
   timed: { access: 'system', view: true, key: ['id'], fields: { id: 'id', a: 'text', ms: 'number' }, query: ['a', 'ms'] },
   viewers: { access: 'system', key: ['viewer'], fields: { viewer: 'text', first_seen: 'time', last_seen: 'time', os: 'text' } },
 };
 const system: Record<string, SystemDecl> = {
   invite: { write: ['invitations'] },
   analytics: { write: ['events', 'viewers'], read: ['timed'] },
+  account_delete: { write: ['accounts'] },
   members: { write: ['membership'] },
   owner_report: { read: ['docs', 'settings'] },
   set_signup: { write: ['settings'] },
@@ -320,6 +323,17 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await code(sys('analytics')((w) => w.remove('timed', { id: uuidv7() })), 'read_only', 'timed');
     });
 
+    test('a removable view: read, rows removed through it by a system intent, never put or updated (ADR 0020)', async () => {
+      const id = uuidv7();
+      await sys('invite')((w) => w.put('invitations', { id, code: 'VIEW-ROWS-0001', email: 'gone@example.com' }));
+      assert.equal(await sys('account_delete')((w) => w.count('accounts', { where: { email: 'gone@example.com' } })), 1);
+      await code(sys('account_delete')((w) => w.update('accounts', { id }, { email: 'x@y.z' })), 'read_only', 'accounts');
+      await code(sys('account_delete')((w) => w.put('accounts', { id: uuidv7(), email: 'x@y.z' })), 'read_only', 'accounts');
+      assert.equal(await sys('account_delete')((w) => w.remove('accounts', { id })), true);
+      assert.equal(await sys('invite')((w) => w.count('invitations', { where: { id } })), 0, 'gone from the table under it');
+      await code(as(A)((w) => w.find('accounts')), 'system_only', 'accounts');
+    });
+
     test('put on a taken key: update, or leave it; a lock holds for the unit', async () => {
       const first = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', first_seen: '2026-11-01T00:00:00.000Z', last_seen: '2026-11-01T00:00:00.000Z', os: 'ios' }));
       assert.equal(first!.os, 'ios');
@@ -365,6 +379,8 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
   before(async () => {
     await engine.migrate({ path }, await engine.plan({ path }));
     // The view is the app's (its migrations make it), so the test makes it here.
+    sqliteExec(path, `create view accounts as select id, email from invitations`);
+    sqliteExec(path, `create trigger accounts_delete instead of delete on accounts begin delete from invitations where id = old.id; end`);
     sqliteExec(path, `create view timed as select id, a, json_extract(e, '$.dur') as ms from events where json_type(e, '$.dur') in ('integer', 'real')`);
   });
 }
@@ -399,6 +415,7 @@ create table ${S}.keys (user_id uuid not null default ${S}.current_user_id(), ve
 create table ${S}.settings (name text primary key, value jsonb not null);
 create table ${S}.invitations (id uuid primary key, code text not null unique, email text not null, redeemed_at timestamptz);
 create table ${S}.events (id uuid primary key, viewer text, sid text, t timestamptz, a text, tab text, e jsonb);
+create view ${S}.accounts as select id, email from ${S}.invitations;
 create view ${S}.timed as select id, a, (e ->> 'dur')::double precision as ms from ${S}.events where jsonb_typeof(e -> 'dur') = 'number';
 create table ${S}.viewers (viewer text primary key, first_seen timestamptz, last_seen timestamptz, os text);
 create table ${S}.engine_audit (id bigint generated always as identity primary key, at timestamptz not null default now(), intent text not null,
@@ -418,7 +435,7 @@ revoke insert, update, delete on ${S}.membership from se2_int_api;
 alter table ${S}.settings enable row level security; alter table ${S}.settings force row level security;
 create policy read on ${S}.settings for select to se2_int_api using (true);
 create policy system on ${S}.settings for all to se2_int_sys using (true) with check (true);
-revoke all on ${S}.invitations, ${S}.events, ${S}.timed, ${S}.viewers, ${S}.engine_audit from se2_int_api;
+revoke all on ${S}.invitations, ${S}.accounts, ${S}.events, ${S}.timed, ${S}.viewers, ${S}.engine_audit from se2_int_api;
 `;
 
 let admin: ReturnType<typeof pg> | undefined;

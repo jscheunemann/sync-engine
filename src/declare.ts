@@ -28,7 +28,7 @@ export interface TypeDecl {
    * A view the app's own migrations define (ADR 0018): read like any type, never written; the schema plan checks it's
    * there with the declared columns and never makes it.
    */
-  view?: true;
+  view?: true | { remove: true };
   /**
    * `system` on a person type (ADR 0019): each person reads their own rows, but only system intents write them (a
    * membership, an owner flag). Default: a person writes their own.

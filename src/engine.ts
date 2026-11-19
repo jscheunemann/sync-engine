@@ -216,7 +216,7 @@ export function createEngine<T extends string, S>(opts: {
     const person = d.access === 'person' ? (d.personColumn ?? 'user_id') : undefined;
     columns[name] = {
       table: d.table ?? name,
-      ...(d.view ? { view: true as const } : {}),
+      ...(d.view ? { view: d.view === true ? (true as const) : { remove: true as const } } : {}),
       ...(d.writes === 'system' ? { personReads: true as const } : {}),
       kinds: { ...(person ? { [person]: 'id' as Kind } : {}), ...d.fields },
       key: [...(person ? [person] : []), ...d.key],
@@ -317,6 +317,7 @@ function checkTypes(types: Readonly<Record<string, TypeDecl>>): void {
     // elsewhere (another schema): the backend checks that, since only it knows where tables are.
     if (ENGINE_TABLES.includes(name)) throw new EngineError('engine_table', name);
     if (d.writes !== undefined && (d.writes !== 'system' || d.access !== 'person')) throw new EngineError('bad_writes', name);
+    if (d.view !== undefined && d.view !== true && !(typeof d.view === 'object' && d.view.remove === true && d.access === 'system')) throw new EngineError('bad_view', name);
     for (const k of [...d.key, ...(d.query ?? []), ...(d.sealed ?? []), ...(d.version ? [d.version] : [])])
       if (!d.fields[k]) throw new EngineError('undeclared_field', `${name}.${k}`);
     for (const k of d.sealed ?? []) if (d.fields[k] !== 'json') throw new EngineError('sealed_not_json', `${name}.${k}`);
@@ -518,10 +519,10 @@ class Core<T extends string> {
   }
 
   /** A declared type, for a write: records are written only through apply. */
-  private writable(type: string): { sh: Shape; person: string | null } {
+  private writable(type: string, op: 'put' | 'update' | 'remove'): { sh: Shape; person: string | null } {
     const sh = this.shape(type);
     if (sh.record) throw new EngineError('records_use_apply', type);
-    if (sh.decl?.view) throw new EngineError('read_only', type);
+    if (sh.decl?.view && !(op === 'remove' && sh.decl.view !== true && (sh.decl.view as { remove?: true }).remove)) throw new EngineError('read_only', type);
     return { sh, person: this.allow(sh, true) };
   }
 
@@ -560,7 +561,7 @@ class Core<T extends string> {
   }
 
   private async put(type: string, given: Row, opts: { onConflict?: 'update' | 'nothing' } = {}): Promise<Row | null> {
-    const { sh, person } = this.writable(type);
+    const { sh, person } = this.writable(type, 'put');
     const row = { ...given };
     let who: unknown = person;
     if (sh.access === 'person') {
@@ -585,7 +586,7 @@ class Core<T extends string> {
   }
 
   private async update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult> {
-    const { sh, person } = this.writable(type);
+    const { sh, person } = this.writable(type, 'update');
     const match = this.keyMatch(sh, key, person);
     const keyRow: Row = Object.fromEntries(sh.key.map((k) => [k, key[k]]));
     for (const k of [...sh.key, sh.personColumn]) if (k in changes) throw new EngineError('key_field', k);
@@ -609,7 +610,7 @@ class Core<T extends string> {
   }
 
   private async remove(type: string, key: Row): Promise<boolean> {
-    const { sh, person } = this.writable(type);
+    const { sh, person } = this.writable(type, 'remove');
     const match = this.keyMatch(sh, key, person);
     let n: number;
     try {

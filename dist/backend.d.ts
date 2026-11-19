@@ -35,7 +35,9 @@ export interface TableLayout {
     /** The table's name (a type's own name unless it declared another). */
     readonly table: string;
     /** A view the app defines: read only, checked by a schema plan, never made. */
-    readonly view?: true;
+    readonly view?: true | {
+        readonly remove: true;
+    };
     /** A person type people only read: their role gets read grants only. */
     readonly personReads?: true;
     readonly kinds: Readonly<Record<string, Kind>>;

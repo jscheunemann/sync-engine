@@ -29,3 +29,4 @@ connection to the layer that owns all of an app's data access.
 | [0017](0017-types-name-their-tables-the-backend-places-them.md) | Types are addressed by name; the backend places their tables | Accepted |
 | [0018](0018-views-are-read-only-types.md) | Views the app defines are read-only types | Accepted |
 | [0019](0019-dates-and-person-types-people-only-read.md) | Dates, and person types people only read | Accepted |
+| [0020](0020-views-system-intents-may-remove-from.md) | Views system intents may remove rows from | Accepted |
