@@ -368,6 +368,7 @@ class Core<T extends string> {
     if (this.store.isType(type)) {
       const fields = this.store.type(type).queryable;
       const queryable = new Map(Object.entries(fields).map(([n, k]) => [n, { col: n, kind: k }]));
+      if (this.person === null) queryable.set('user_id', { col: 'user_id', kind: 'id' });
       return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable };
     }
     const d = this.types[type];
@@ -375,6 +376,8 @@ class Core<T extends string> {
     const queryable = new Map<string, { col: string; kind: Kind }>();
     for (const n of [...d.key, ...(d.query ?? [])]) queryable.set(n, { col: n, kind: d.fields[n]! });
     for (const [n, x] of Object.entries(d.paths ?? {})) queryable.set(n, { col: n, kind: x.kind });
+    // A system unit reaches every person's rows of a person type, so it may filter, order and group by whose they are.
+    if (d.access === 'person' && this.person === null) queryable.set(d.personColumn ?? 'user_id', { col: d.personColumn ?? 'user_id', kind: 'id' });
     return { name: type, table: type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
   }
 

@@ -48,7 +48,7 @@ stops (offline, signed out) keeps what it did and finishes next time. Edits made
 
 ## Version 2: the engine owns data access
 
-Version 2.0.0 (ADR 0011). Install with `github:jscheunemann/sync-engine#v2.4.0`. Version 1's `./server` is still in the
+Version 2.0.0 (ADR 0011). Install with `github:jscheunemann/sync-engine#v2.4.1`. Version 1's `./server` is still in the
 package, unchanged, for apps that haven't moved yet.
 
 Following `docs/adr/` 0002 to 0016, an app gives the engine connection settings and intents; the engine owns the
@@ -106,7 +106,8 @@ await session.work({ person }, (w) => w.find('data_keys', { order: '-version', l
 await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations', { where: { code, redeemed_at: { is: null } } }));
 ```
 
-- `w.find(type, { where, order, limit, after })` → `{ rows, next }`; `w.count(type, { where })`.
+- `w.find(type, { where, order, limit, after })` → `{ rows, next }`; `w.count(type, { where })`. A system unit may also
+  filter, order and group a person type by its person column.
 - `w.put(type, row)`, `w.update(type, key, changes, version?)` (`applied`, `conflict` with the current row, or
   `not_found`), `w.remove(type, key)`.
 - `person` types are each person's; `shared` types are read by anyone and written by system intents; `system` types

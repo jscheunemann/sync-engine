@@ -250,6 +250,12 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       const page = await sys('owner_report', OWNER)((w) => w.find('docs', { limit: 1000 }));
       const people = new Set(page.rows.map((x) => x.user_id));
       assert.ok(people.has(A) && people.size >= 2, 'rows of more than one person, each labelled');
+      // …filtered and grouped by whose they are (a person unit can't name anyone: its own rows are all it has)
+      const onlyA = await sys('owner_report')((w) => w.find('docs', { where: { user_id: A }, limit: 1000 }));
+      assert.ok(onlyA.rows.length > 0 && onlyA.rows.every((x) => x.user_id === A));
+      const perPerson = await sys('owner_report')((w) => w.summarize('docs', { by: ['user_id'], measures: { n: { count: true } } }));
+      assert.equal(perPerson.find((x) => x.user_id === A)!.n, onlyA.rows.length);
+      await code(as(A)((w) => w.find('docs', { where: { user_id: B } as never })), 'not_queryable', 'user_id');
       // Records, the change feed and prefs are one person's.
       await code(sys('owner_report')((w) => w.prefs.get()), 'person_scope_only');
       await code(sys('owner_report')((w) => w.changes(0, 10)), 'person_scope_only');

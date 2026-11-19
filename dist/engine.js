@@ -227,6 +227,8 @@ class Core {
         if (this.store.isType(type)) {
             const fields = this.store.type(type).queryable;
             const queryable = new Map(Object.entries(fields).map(([n, k]) => [n, { col: n, kind: k }]));
+            if (this.person === null)
+                queryable.set('user_id', { col: 'user_id', kind: 'id' });
             return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable };
         }
         const d = this.types[type];
@@ -237,6 +239,9 @@ class Core {
             queryable.set(n, { col: n, kind: d.fields[n] });
         for (const [n, x] of Object.entries(d.paths ?? {}))
             queryable.set(n, { col: n, kind: x.kind });
+        // A system unit reaches every person's rows of a person type, so it may filter, order and group by whose they are.
+        if (d.access === 'person' && this.person === null)
+            queryable.set(d.personColumn ?? 'user_id', { col: d.personColumn ?? 'user_id', kind: 'id' });
         return { name: type, table: type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
     }
     /** Whether this unit may read or write a type (ADR 0009); the person filter a query takes when it may. */
