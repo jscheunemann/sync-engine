@@ -121,6 +121,7 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 - Postgres keeps tables in `schema`, or per type in `schemas: { type: schema }` for tables adopted elsewhere (ADR 0017).
 - `w.put(type, row, { onConflict: 'update' | 'nothing' })` for insert-or-update; `w.lock(name)` for the rest of the unit.
 - `w.erase(person, { keep })` in a system unit whose intent declares `erase: true`: every row of one person (ADR 0022).
+- `w.removeWhere(type, where)` in a system unit, for a system type its intent writes: every matching row in one statement (ADR 0023).
 - Refusals are `EngineError`s: a code and a field, never a value.
 
 ## Using it

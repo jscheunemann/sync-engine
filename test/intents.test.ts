@@ -341,6 +341,23 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await code(as(A)((w) => w.find('accounts')), 'system_only', 'accounts');
     });
 
+    test('removeWhere: every matching row of a system type in one statement, by a system intent that writes it (ADR 0023)', async () => {
+      const v1 = 'rw-' + uuidv7(), v2 = 'rw-' + uuidv7();
+      for (const v of [v1, v1, v1, v2]) await sys('analytics')((w) => w.put('events', { id: uuidv7(), viewer: v, sid: 's', t: '2026-11-19T00:00:00Z', a: 'open', tab: 'x', e: {} }));
+      const P = uuidv7();
+      await code(as(P)((w) => w.removeWhere('events', { viewer: v1 })), 'system_only', 'removeWhere');
+      await code(sys('invite')((w) => w.removeWhere('events', { viewer: v1 })), 'not_permitted', 'events');
+      await code(sys('analytics')((w) => w.removeWhere('events', {})), 'where_required', 'events');
+      await code(sys('analytics')((w) => w.removeWhere('events', { e: 'x' })), 'not_queryable', 'e');
+      await code(sys('erase_person')((w) => w.removeWhere('keys', { version: 1 })), 'system_type_only', 'keys');
+      const before = (await r.audit()).length;
+      assert.equal(await sys('analytics')((w) => w.removeWhere('events', { viewer: v1 })), 3);
+      assert.equal(await sys('analytics')((w) => w.removeWhere('events', { viewer: v1 })), 0);
+      assert.equal(await sys('analytics')((w) => w.count('events', { where: { viewer: v2 } })), 1, 'the other viewer’s rows are untouched');
+      const lines = (await r.audit()).slice(before).filter((x) => x.action === 'remove');
+      assert.deepEqual(lines.map((x) => Number(x.rows)), [3, 0], 'one audit line a call, with the count');
+    });
+
     test('erase: every row of one person, by a system intent that declares it, keeping what it says (ADR 0022)', async () => {
       const Z = uuidv7(), Y = uuidv7();
       for (const p of [Z, Y]) {

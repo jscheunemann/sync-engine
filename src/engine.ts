@@ -171,6 +171,11 @@ export interface Work<T extends string = string> extends Reader<T> {
   update(type: string, key: Row, changes: Row, version?: number): Promise<UpdateResult>;
   /** Removes the row with this key; returns whether there was one. */
   remove(type: string, key: Row): Promise<boolean>;
+  /**
+   * Removes every row of a system type that matches (ADR 0023), in a system unit whose intent writes the type: one
+   * statement and one audit line, however many rows. `where` must name at least one field. Returns the rows removed.
+   */
+  removeWhere(type: string, where: Where): Promise<number>;
 }
 
 /** A request's session: one connection, any number of units of work. */
@@ -644,6 +649,22 @@ class Core<T extends string> {
     return n > 0;
   }
 
+  private async removeWhere(type: string, where: Where): Promise<number> {
+    if (!this.intent) throw new EngineError('system_only', 'removeWhere');
+    const { sh } = this.writable(type, 'remove');
+    if (sh.access !== 'system') throw new EngineError('system_type_only', type);
+    const match = conditions(where, sh.queryable);
+    if (!match.length) throw new EngineError('where_required', type);
+    let n: number;
+    try {
+      n = await this.u.savepoint((sp) => sp.remove(sh.table, match));
+    } catch (e) {
+      this.refused(e);
+    }
+    await this.audit(sh, 'remove', n);
+    return n;
+  }
+
   reader(u: Unit): Reader<T> {
     return {
       get: async (type, id) => {
@@ -685,6 +706,7 @@ class Core<T extends string> {
       },
       update: (type, key, changes, version) => this.update(type, key, changes, version),
       remove: (type, key) => this.remove(type, key),
+      removeWhere: (type, where) => this.removeWhere(type, where),
     };
   }
 

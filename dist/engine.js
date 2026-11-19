@@ -544,6 +544,25 @@ class Core {
         await this.audit(sh, 'remove', n);
         return n > 0;
     }
+    async removeWhere(type, where) {
+        if (!this.intent)
+            throw new EngineError('system_only', 'removeWhere');
+        const { sh } = this.writable(type, 'remove');
+        if (sh.access !== 'system')
+            throw new EngineError('system_type_only', type);
+        const match = conditions(where, sh.queryable);
+        if (!match.length)
+            throw new EngineError('where_required', type);
+        let n;
+        try {
+            n = await this.u.savepoint((sp) => sp.remove(sh.table, match));
+        }
+        catch (e) {
+            this.refused(e);
+        }
+        await this.audit(sh, 'remove', n);
+        return n;
+    }
     reader(u) {
         return {
             get: async (type, id) => {
@@ -586,6 +605,7 @@ class Core {
             },
             update: (type, key, changes, version) => this.update(type, key, changes, version),
             remove: (type, key) => this.remove(type, key),
+            removeWhere: (type, where) => this.removeWhere(type, where),
         };
     }
     async record(u, type, id, lock) {
