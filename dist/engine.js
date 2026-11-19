@@ -83,7 +83,7 @@ export function createEngine(opts) {
             ...(d.paths ? { paths: d.paths } : {}),
         };
     }
-    const layout = { types: store.types, tables, columns };
+    const layout = { types: store.types, tables, columns, erase: Object.values(system ?? {}).some((d) => d.erase === true) };
     const schema = () => {
         if (!backend.schema)
             throw new EngineError('no_schema_support', backend.kind);

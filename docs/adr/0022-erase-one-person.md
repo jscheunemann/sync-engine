@@ -21,6 +21,8 @@ key.
 - Views are never erased through (they belong to someone else); shared and system types aren't either: what of those
   is the person's is for the app to remove with `remove`, in the same unit.
 - It runs in the unit's transaction: all or nothing.
+- **Grants:** when some system intent declares `erase`, the schema plan lets the system role select and delete in the
+  record tables and the engine's own tables (with a delete and a read policy on the latter). Otherwise it gets neither.
 
 ## Consequences
 
