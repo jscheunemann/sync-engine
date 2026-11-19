@@ -134,6 +134,16 @@ describe('the plan', () => {
     assert.doesNotMatch(sql2, /"settings" force row level security/);
   });
 
+  test('erase: the system role may delete records and the engine’s own rows only when some intent erases (ADR 0022)', () => {
+    const sqls = (l: Parameters<typeof plan>[0]) => plan(l, none, opts).steps.map((s) => s.sql);
+    const without = sqls(layoutOf());
+    assert.ok(!without.some((x) => /grant [a-z, ]*delete[a-z, ]* on "app"\."(tasks|counters|applied_ops|prefs)" to "app_sys"/.test(x)));
+    const withErase = sqls({ ...layoutOf(), erase: true });
+    for (const t of ['tasks', 'counters', 'applied_ops', 'prefs'])
+      assert.ok(withErase.some((x) => new RegExp(`grant [a-z, ]*delete[a-z, ]* on "app"\\."${t}" to "app_sys"`).test(x)), t);
+    assert.ok(withErase.some((x) => /create policy "engine_system_erase" on "app"\."applied_ops" for delete to "app_sys"/.test(x)));
+  });
+
   test('nothing to do when everything is there', () => {
     const p1 = plan(layoutOf(), none, opts);
     // What applying p1 leaves: every table and column, function, index, policy and grant it made.
@@ -216,6 +226,27 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
       );
       const audit = await admin.unsafe(`select intent, action from ${S}.engine_audit order by id`);
       assert.deepEqual(audit.map((a) => `${a.intent}:${a.action}`), ['set:put', 'invite:put', 'invite:count']);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test('erase on what the plan made: the system role deletes one person’s records, rows and the engine’s own (ADR 0022)', async () => {
+    const eraser = createEngine({ store, backend: postgres, types, system: { ...system, forget: { erase: true, write: ['keys'] } } });
+    await eraser.migrate(settings, await eraser.plan(settings));
+    assert.deepEqual((await eraser.plan(settings)).steps.map((s) => s.summary), []);
+    const session = eraser.connect(settings);
+    try {
+      const A = uuidv7(), B = uuidv7();
+      for (const p of [A, B]) {
+        await session.work({ person: p }, (w) => w.apply([{ op_id: uuidv7(), type: 'tasks', id: uuidv7(), base_version: null, fields: { title: 'x', tags: [], due: null, notes: 'n' } }]));
+        await session.work({ person: p }, (w) => w.put('keys', { version: 1, wrapped: 'k' }));
+      }
+      const gone = await session.work({ system: 'forget', by: A }, (w) => w.erase(A));
+      assert.deepEqual([gone.tasks, gone.keys, gone.applied_ops, gone.counters], [1, 1, 1, 1]);
+      assert.equal((await session.work({ person: A }, (w) => w.changes(0, 10))).changes.length, 0);
+      assert.equal((await session.work({ person: B }, (w) => w.changes(0, 10))).changes.length, 1, 'B untouched');
+      assert.equal((await session.work({ person: B }, (w) => w.find('keys'))).rows.length, 1);
     } finally {
       await session.close();
     }
