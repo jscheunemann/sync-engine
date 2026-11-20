@@ -176,6 +176,12 @@ export interface Work<T extends string = string> extends Reader<T> {
    * statement and one audit line, however many rows. `where` must name at least one field. Returns the rows removed.
    */
   removeWhere(type: string, where: Where): Promise<number>;
+  /**
+   * In a system unit that writes for a person: keeps an erase of that person waiting until this unit ends, and waits
+   * for one that is under way (ADR 0024). A person's own unit does this by itself. Read whatever says the person is
+   * being erased after this, in the same unit.
+   */
+  hold(person: string): Promise<void>;
 }
 
 /** A request's session: one connection, any number of units of work. */
@@ -305,6 +311,7 @@ interface Shape {
   decl?: TypeDecl;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FIND_LIMIT = 100;
 /** An IANA time zone the runtime knows. */
 const validZone = (z: unknown): z is string => {
@@ -535,13 +542,15 @@ class Core<T extends string> {
   private async erase(person: string, keep: readonly string[]): Promise<Record<string, number>> {
     if (!this.intent) throw new EngineError('system_only', 'erase');
     if (!this.intent.decl.erase) throw new EngineError('not_permitted', 'erase');
-    if (typeof person !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(person)) throw new EngineError('bad_value', 'person');
+    if (typeof person !== 'string' || !UUID.test(person)) throw new EngineError('bad_value', 'person');
     for (const k of keep) if (!this.types[k] && !this.store.isType(k)) throw new EngineError('unknown_type', k);
     const declared = (this.intent.decl.write ?? []).filter((t) => this.types[t]?.access === 'person' && !this.types[t]?.view);
     const types = [...this.store.types, ...declared].filter((t) => !keep.includes(t));
     const removed = await this.u.erase(person.toLowerCase(), types);
     const total = Object.values(removed).reduce((a, n) => a + n, 0);
-    await this.u.audit({ intent: this.intent.name, by: this.intent.by, type: '*', action: 'erase', rows: total });
+    // the erased person is named nowhere in the audit, this line included (ADR 0024)
+    const by = this.intent.by?.toLowerCase() === person.toLowerCase() ? null : this.intent.by;
+    await this.u.audit({ intent: this.intent.name, by, type: '*', action: 'erase', rows: total });
     return removed;
   }
 
@@ -707,6 +716,11 @@ class Core<T extends string> {
       update: (type, key, changes, version) => this.update(type, key, changes, version),
       remove: (type, key) => this.remove(type, key),
       removeWhere: (type, where) => this.removeWhere(type, where),
+      hold: async (person) => {
+        if (!this.intent) throw new EngineError('system_only', 'hold');
+        if (typeof person !== 'string' || !UUID.test(person)) throw new EngineError('bad_value', 'person');
+        await this.u.hold(person.toLowerCase());
+      },
     };
   }
 

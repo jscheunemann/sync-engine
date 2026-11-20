@@ -76,13 +76,13 @@ export function plan(layout, have, o) {
             step(`Let ${needUsage.join(' and ')} use schema ${sc}`, `grant usage on schema ${q(sc)} to ${needUsage.map(q).join(', ')};`);
     }
     /** Grants a role what it lacks on a table (or `fn:name`) in a schema, and nothing it already has. */
-    const grant = (role, privs, schema, obj) => {
+    const grant = (role, privs, schema, obj, args = '') => {
         if (!role)
             return;
         const missing = privs.filter((p) => !(cat(schema).grants[obj]?.[role] ?? []).includes(p));
         if (!missing.length)
             return;
-        const target = obj.startsWith('fn:') ? `function ${q(schema)}.${q(obj.slice(3))}()` : at(schema, obj);
+        const target = obj.startsWith('fn:') ? `function ${q(schema)}.${q(obj.slice(3))}(${args})` : at(schema, obj);
         step(`Grant ${role} ${missing.join(', ')} on ${schema}.${obj.replace(/^fn:/, '')}`, `grant ${missing.join(', ')} on ${target} to ${q(role)};`);
     };
     // Row-level security is turned on wherever it's off. It's forced on tables the plan makes; on a table that's already
@@ -130,6 +130,13 @@ export function plan(layout, have, o) {
     grant(o.role, ['execute'], main, 'fn:next_rev');
     grant(o.systemRole, ['insert'], main, 'engine_audit');
     grant(o.systemRole, ['execute'], main, 'fn:current_user_id');
+    // Erasing a person takes them out of the audit too (ADR 0024). The system role may only add audit lines, so this one
+    // change, clearing who caused a line for one person, is a function with its owner's rights and nothing else.
+    if (layout.erase && o.systemRole) {
+        if (!mine.functions.includes('forget_person'))
+            step('Create forget_person()', `create function ${M}.forget_person(p uuid) returns integer language sql volatile security definer set search_path = '' as $$ with u as (update ${M}.engine_audit set by_person = null where by_person = p returning 1) select count(*)::int from u $$; revoke all on function ${M}.forget_person(uuid) from public;`);
+        grant(o.systemRole, ['execute'], main, 'fn:forget_person', 'uuid');
+    }
     // Erasing a person (ADR 0022): the system role deletes from the engine's own tables, and from the record tables below.
     if (layout.erase && o.systemRole)
         for (const name of ['counters', 'applied_ops', 'prefs']) {

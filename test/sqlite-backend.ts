@@ -355,8 +355,10 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
         out[type] = all(type, `delete from ${declared(type)} where ${q(c?.person ?? 'user_id')} = ? returning 1 as gone`, [p]).length;
       }
       for (const t of ['applied_ops', 'prefs', 'counters']) out[t] = all(t, `delete from ${t} where user_id = ? returning 1 as gone`, [p]).length;
+      all('engine_audit', `update engine_audit set by_person = null where by_person = ? returning 1 as gone`, [p]);
       return out;
     },
+    hold: async () => {}, // one writer at a time already
     update: async (table, match, changes) => {
       const w = where(table, match);
       if (!Object.keys(changes).length) return one(table, `select * from ${declared(table)} where ${w.sql}`, w.params);
