@@ -382,6 +382,28 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.ok(log.some((x) => x.intent === 'erase_person' && x.action === 'erase' && Number(x.rows) >= 4));
     });
 
+    test('erase takes the person out of the audit: their lines stay, naming no one; hold is a system unit’s (ADR 0024)', async () => {
+      const Z = uuidv7(), Y = uuidv7();
+      for (const p of [Z, Y]) await sys('members', p)((w) => w.put('membership', { user_id: p, since: '2026-01-01', via: 'invitation' }));
+      const named = async (p: string) => (await r.audit()).filter((x) => String(x.by_person ?? '').toLowerCase() === p.toLowerCase()).length;
+      assert.ok((await named(Z)) >= 1);
+      const lines = (await r.audit()).length;
+      await sys('erase_person', Z)((w) => w.erase(Z)); // by the person themself, as when they delete their own account
+      assert.equal(await named(Z), 0, 'Z is named nowhere, the erase line included');
+      assert.ok((await named(Y)) >= 1, 'others are still named');
+      const log = await r.audit();
+      assert.equal(log.length, lines + 1, 'no line is removed');
+      assert.equal(log[log.length - 1]!.action, 'erase');
+      assert.equal(log[log.length - 1]!.by_person, null);
+      // an owner erasing someone else is still named
+      await sys('erase_person', OWNER)((w) => w.erase(Y));
+      const last = (await r.audit()).at(-1)!;
+      assert.equal(String(last.by_person).toLowerCase(), OWNER.toLowerCase());
+      await code(as(Z)((w) => w.hold(Z)), 'system_only', 'hold');
+      await code(sys('members')((w) => w.hold('nobody')), 'bad_value', 'person');
+      await sys('members')((w) => w.hold(Z));
+    });
+
     test('put on a taken key: update, or leave it; a lock holds for the unit', async () => {
       const first = await sys('analytics')((w) => w.put('viewers', { viewer: 'v9', first_seen: '2026-11-01T00:00:00.000Z', last_seen: '2026-11-01T00:00:00.000Z', os: 'ios' }));
       assert.equal(first!.os, 'ios');
@@ -471,6 +493,7 @@ create view ${S}.timed as select id, a, (e ->> 'dur')::double precision as ms fr
 create table ${S}.viewers (viewer text primary key, first_seen timestamptz, last_seen timestamptz, os text);
 create table ${S}.engine_audit (id bigint generated always as identity primary key, at timestamptz not null default now(), intent text not null,
   by_person uuid, type text not null, action text not null, rows integer not null);
+create function ${S}.forget_person(p uuid) returns integer language sql volatile security definer set search_path = '' as $$ with u as (update ${S}.engine_audit set by_person = null where by_person = p returning 1) select count(*)::int from u $$;
 grant usage on schema ${S} to se2_int_api, se2_int_sys;
 grant select, insert, update, delete on all tables in schema ${S} to se2_int_api, se2_int_sys;
 grant execute on all functions in schema ${S} to se2_int_api, se2_int_sys;

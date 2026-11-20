@@ -346,7 +346,12 @@ function unit(tx, layout, settings, person) {
         lock: async (name) => {
             await tx `select pg_advisory_xact_lock(hashtext(${`${schema}:${name}`}))`;
         },
+        hold: async (p) => {
+            await tx `select pg_advisory_xact_lock_shared(hashtextextended(${personLock(schema, p)}, 0))`;
+        },
         erase: async (p, types) => {
+            // Alone with this person: open units of theirs end first, later ones wait for this one (ADR 0024).
+            await tx `select pg_advisory_xact_lock(hashtextextended(${personLock(schema, p)}, 0))`;
             const out = {};
             const del = async (key, t, col) => {
                 try {
@@ -364,6 +369,7 @@ function unit(tx, layout, settings, person) {
             }
             for (const t of ['applied_ops', 'prefs', 'counters'])
                 await del(t, table(t), 'user_id');
+            await tx `select ${table('forget_person')}(${p}::uuid)`;
             return out;
         },
         audit: async (a) => {
@@ -372,6 +378,8 @@ function unit(tx, layout, settings, person) {
     };
     return u;
 }
+/** The name of the lock a person's units share and an erase of them takes alone. */
+const personLock = (schema, person) => `${schema}:person:${person}`;
 function checked(settings, layout) {
     if (!settings?.url)
         throw new Error('no_database');
@@ -474,6 +482,9 @@ export const postgres = {
                     // otherwise rounded to 15 digits). A system unit sets no person: row-level security then shows no one's rows
                     // to anything but the system role.
                     await tx `select set_config(${personSetting}, ${sys ? '' : scope.person}, true), set_config('extra_float_digits', '3', true)`;
+                    // Where a person can be erased, their own units hold the erase off until they end (ADR 0024).
+                    if (!sys && layout.erase)
+                        await tx `select pg_advisory_xact_lock_shared(hashtextextended(${personLock(schema, scope.person.toLowerCase())}, 0))`;
                     return fn(unit(tx, layout, settings, sys ? null : scope.person));
                 });
             },

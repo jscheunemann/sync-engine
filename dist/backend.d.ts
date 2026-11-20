@@ -193,8 +193,13 @@ export interface Unit {
     /**
      * Deletes every row of one person: in these record types and person types (by type name: user_id for records, each
      * type's person column for declared ones) and in the engine's own tables. Returns the rows removed, by type.
+     * It first waits for every open unit of that person (and every unit holding them) to end, and units of theirs that
+     * start meanwhile wait for this one (ADR 0024). It also takes the person out of the audit: lines they caused stay,
+     * with no one named.
      */
     erase(person: string, types: readonly string[]): Promise<Record<string, number>>;
+    /** Keeps an erase of this person waiting until the unit ends, as a person's own unit does (ADR 0024). */
+    hold(person: string): Promise<void>;
     /** Changes the row matching `match` (all conditions); returns it as stored, or null when none matches. */
     update(table: string, match: readonly Cond[], cols: Row): Promise<Row | null>;
     /** Removes the rows matching `match`; returns how many. */

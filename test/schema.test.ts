@@ -142,6 +142,11 @@ describe('the plan', () => {
     for (const t of ['tasks', 'counters', 'applied_ops', 'prefs'])
       assert.ok(withErase.some((x) => new RegExp(`grant [a-z, ]*delete[a-z, ]* on "app"\\."${t}" to "app_sys"`).test(x)), t);
     assert.ok(withErase.some((x) => /create policy "engine_system_erase" on "app"\."applied_ops" for delete to "app_sys"/.test(x)));
+    // taking a person out of the audit: one function, the system role's alone (ADR 0024)
+    assert.ok(!without.some((x) => /forget_person/.test(x)));
+    assert.ok(withErase.some((x) => /create function "app"\.forget_person\(p uuid\).*security definer.*revoke all on function "app"\.forget_person\(uuid\) from public;/s.test(x)));
+    assert.ok(withErase.some((x) => /grant execute on function "app"\."forget_person"\(uuid\) to "app_sys";/.test(x)));
+    assert.ok(!withErase.some((x) => /grant [a-z, ]*(update|delete|select)[a-z, ]* on "app"\."engine_audit"/.test(x)), 'the audit itself stays add-only');
   });
 
   test('nothing to do when everything is there', () => {
@@ -247,6 +252,49 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
       assert.equal((await session.work({ person: A }, (w) => w.changes(0, 10))).changes.length, 0);
       assert.equal((await session.work({ person: B }, (w) => w.changes(0, 10))).changes.length, 1, 'B untouched');
       assert.equal((await session.work({ person: B }, (w) => w.find('keys'))).rows.length, 1);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test('an erase waits for the person’s open units, and theirs that start meanwhile wait for it (ADR 0024)', async () => {
+    const eraser = createEngine({ store, backend: postgres, types, system: { ...system, forget: { erase: true, write: ['keys'] } } });
+    await eraser.migrate(settings, await eraser.plan(settings));
+    assert.deepEqual((await eraser.plan(settings)).steps.map((s) => s.summary), [], 'forget_person and its grant are made once');
+    const session = eraser.connect({ ...settings, max: 5 }); // three units are open at once below
+    const gate = () => { let open!: () => void; const p = new Promise<void>((r) => (open = r)); return { p, open }; };
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const task = () => ({ op_id: uuidv7(), type: 'tasks' as const, id: uuidv7(), base_version: null, fields: { title: 'x', tags: [], due: null, notes: 'n' } });
+    try {
+      const A = uuidv7(), B = uuidv7();
+      await session.work({ person: B }, (w) => w.apply([task()]));
+      // a write of A's is open when the erase starts: the erase waits, then removes what it wrote
+      const g1 = gate(), wrote = gate();
+      const writing = session.work({ person: A }, async (w) => { await w.apply([task()]); wrote.open(); await g1.p; });
+      await wrote.p;
+      let erased = false;
+      const erasing = session.work({ system: 'forget', by: A }, (w) => w.erase(A)).then((x) => { erased = true; return x; });
+      await pause(400);
+      assert.equal(erased, false, 'the erase waits for the open unit');
+      // another person's unit is never held up
+      await session.work({ person: B }, (w) => w.apply([task()]));
+      g1.open();
+      await writing;
+      assert.equal((await erasing).tasks, 1, 'what the open unit wrote is erased with the rest');
+      assert.equal((await session.work({ person: A }, (w) => w.changes(0, 10))).changes.length, 0);
+      // an erase is open when A's next unit starts: the unit waits for it; a system unit holding A does too
+      const g2 = gate(), started = gate();
+      const erasing2 = session.work({ system: 'forget' }, async (w) => { await w.erase(A); started.open(); await g2.p; });
+      await started.p;
+      let ran = false, held = false;
+      const later = session.work({ person: A }, async (w) => { ran = true; return w.count('keys'); });
+      const holding = session.work({ system: 'forget' }, async (w) => { await w.hold(A); held = true; });
+      await pause(400);
+      assert.deepEqual([ran, held], [false, false], 'both wait for the erase to end');
+      g2.open();
+      await erasing2; await later; await holding;
+      assert.deepEqual([ran, held], [true, true]);
+      assert.equal((await session.work({ person: B }, (w) => w.changes(0, 10))).changes.length, 2, 'B untouched');
     } finally {
       await session.close();
     }

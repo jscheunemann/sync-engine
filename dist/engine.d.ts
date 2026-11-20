@@ -157,6 +157,12 @@ export interface Work<T extends string = string> extends Reader<T> {
      * statement and one audit line, however many rows. `where` must name at least one field. Returns the rows removed.
      */
     removeWhere(type: string, where: Where): Promise<number>;
+    /**
+     * In a system unit that writes for a person: keeps an erase of that person waiting until this unit ends, and waits
+     * for one that is under way (ADR 0024). A person's own unit does this by itself. Read whatever says the person is
+     * being erased after this, in the same unit.
+     */
+    hold(person: string): Promise<void>;
 }
 /** A request's session: one connection, any number of units of work. */
 export interface Session<T extends string = string> {

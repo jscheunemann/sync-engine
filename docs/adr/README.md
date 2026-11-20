@@ -33,3 +33,4 @@ connection to the layer that owns all of an app's data access.
 | [0021](0021-adopted-tables-keep-their-force-setting.md) | Adopted tables keep their own force setting | Accepted |
 | [0022](0022-erase-one-person.md) | Erase one person | Accepted |
 | [0023](0023-remove-where.md) | Remove every matching row of a system type | Accepted |
+| [0024](0024-erase-waits-and-forgets.md) | An erase waits for the person's open work, and takes them out of the audit | Accepted |

@@ -140,6 +140,7 @@ export function fieldsFrom(store, type, rec) {
         out[name] = rec[name] ?? null;
     return out;
 }
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FIND_LIMIT = 100;
 /** An IANA time zone the runtime knows. */
 const validZone = (z) => {
@@ -410,7 +411,7 @@ class Core {
             throw new EngineError('system_only', 'erase');
         if (!this.intent.decl.erase)
             throw new EngineError('not_permitted', 'erase');
-        if (typeof person !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(person))
+        if (typeof person !== 'string' || !UUID.test(person))
             throw new EngineError('bad_value', 'person');
         for (const k of keep)
             if (!this.types[k] && !this.store.isType(k))
@@ -419,7 +420,9 @@ class Core {
         const types = [...this.store.types, ...declared].filter((t) => !keep.includes(t));
         const removed = await this.u.erase(person.toLowerCase(), types);
         const total = Object.values(removed).reduce((a, n) => a + n, 0);
-        await this.u.audit({ intent: this.intent.name, by: this.intent.by, type: '*', action: 'erase', rows: total });
+        // the erased person is named nowhere in the audit, this line included (ADR 0024)
+        const by = this.intent.by?.toLowerCase() === person.toLowerCase() ? null : this.intent.by;
+        await this.u.audit({ intent: this.intent.name, by, type: '*', action: 'erase', rows: total });
         return removed;
     }
     /** A declared type, for a write: records are written only through apply. */
@@ -606,6 +609,13 @@ class Core {
             update: (type, key, changes, version) => this.update(type, key, changes, version),
             remove: (type, key) => this.remove(type, key),
             removeWhere: (type, where) => this.removeWhere(type, where),
+            hold: async (person) => {
+                if (!this.intent)
+                    throw new EngineError('system_only', 'hold');
+                if (typeof person !== 'string' || !UUID.test(person))
+                    throw new EngineError('bad_value', 'person');
+                await this.u.hold(person.toLowerCase());
+            },
         };
     }
     async record(u, type, id, lock) {
