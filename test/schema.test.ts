@@ -261,7 +261,7 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
     const eraser = createEngine({ store, backend: postgres, types, system: { ...system, forget: { erase: true, write: ['keys'] } } });
     await eraser.migrate(settings, await eraser.plan(settings));
     assert.deepEqual((await eraser.plan(settings)).steps.map((s) => s.summary), [], 'forget_person and its grant are made once');
-    const session = eraser.connect(settings);
+    const session = eraser.connect({ ...settings, max: 5 }); // three units are open at once below
     const gate = () => { let open!: () => void; const p = new Promise<void>((r) => (open = r)); return { p, open }; };
     const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const task = () => ({ op_id: uuidv7(), type: 'tasks' as const, id: uuidv7(), base_version: null, fields: { title: 'x', tags: [], due: null, notes: 'n' } });
