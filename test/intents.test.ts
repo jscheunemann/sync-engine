@@ -291,6 +291,35 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.equal(await sys('invite')((w) => w.count('invitations', { where: { code: 'ZZZZ-ZZZZ-ZZZZ' } })), 0);
     });
 
+    test('attempt: what it did is undone when it throws, the rest of the unit lands; kept when it returns (ADR 0025)', async () => {
+      const kept = uuidv7(), undone = uuidv7(), inner = uuidv7(), after = uuidv7();
+      const out = await as(A)(async (w) => {
+        await w.put('docs', { id: kept, title: 'before' });
+        await assert.rejects(
+          w.attempt(async (t) => {
+            await t.put('docs', { id: undone, title: 'tried' });
+            assert.equal((await t.update('docs', { id: kept }, { title: 'changed in the attempt' }, 1)).status, 'applied');
+            assert.equal((await t.find('docs', { where: { id: undone } })).rows.length, 1, 'seen inside the attempt');
+            throw new Error('no');
+          }),
+          /no/,
+        );
+        const r = await w.attempt(async (t) => {
+          await t.put('docs', { id: inner, title: 'kept' });
+          // nested: the inner one undone, the outer one kept
+          await assert.rejects(t.attempt(async (u) => { await u.put('docs', { id: after, title: 'x' }); throw new Error('inner'); }), /inner/);
+          return 'done';
+        });
+        assert.equal((await w.find('docs', { where: { id: undone } })).rows.length, 0, 'undone in the rest of the unit');
+        return r;
+      });
+      assert.equal(out, 'done');
+      const titles = Object.fromEntries((await as(A)((w) => w.find('docs', { where: { id: { in: [kept, undone, inner, after] } } }))).rows.map((x) => [x.id, x.title]));
+      assert.deepEqual(titles, { [kept]: 'before', [inner]: 'kept' });
+      // in a system unit too, kept to its intent
+      await assert.rejects(sys('invite', OWNER)((w) => w.attempt((t) => t.put('docs', { id: uuidv7(), title: 'x' }))), EngineError);
+    });
+
     test('summaries: groups (fields, JSON paths, a local day), counts, distinct and conditional counts, sums, percentiles, order and limit', async () => {
       const ev = (viewer: string, sid: string, t: string, a: string, tab: string | null, e: Row) => sys('analytics')((w) => w.put('events', { id: uuidv7(), viewer, sid, t, a, tab, e }));
       // Two viewers over two New York days (the 03:30Z event is still the 19th there).

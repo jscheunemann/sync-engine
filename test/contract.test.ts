@@ -283,6 +283,29 @@ describe(`contract: ${name}`, { skip }, () => {
     assert.deepEqual(await session.work({ person: P }, (w) => w.prefs.get()), { data: {}, version: 0 });
   });
 
+  test('an attempt that throws undoes its ops, their revs and their stored results; the rest of the unit lands (ADR 0025)', async () => {
+    const P = uuidv7();
+    const tried = { op_id: uuidv7(), type: 'notes' as T, id: uuidv7(), base_version: null, fields: { title: 'tried' } };
+    const kept = { op_id: uuidv7(), type: 'notes' as T, id: uuidv7(), base_version: null, fields: { title: 'kept' } };
+    await session.work({ person: P }, async (w) => {
+      await assert.rejects(
+        w.attempt(async (t) => {
+          const [r] = await t.apply([tried]);
+          assert.equal(r!.status, 'applied');
+          throw new Error('check only');
+        }),
+        /check only/,
+      );
+      const [r] = await w.attempt((t) => t.apply([kept]));
+      assert.equal(r!.status, 'applied');
+    });
+    assert.equal(await session.work({ person: P }, (w) => w.get('notes', tried.id)), null);
+    const [again] = await session.work({ person: P }, (w) => w.apply([tried]));
+    assert.equal(again!.status, 'applied', 'not a duplicate: its result was undone too');
+    const feed = await session.work({ person: P }, (w) => w.changes(0, 10));
+    assert.deepEqual(feed.changes.map((c) => c.record.rev), [1, 2], 'the undone op’s rev was given back');
+  });
+
   test('two devices sync through the engine: offline edits to different fields merge; a deletion reaches the other device', async () => {
     const P = uuidv7();
     const dev = () => ({ recs: new Map() as Recs<T>, prefs: {} as Fields, state: emptyState<T>() as SyncState<T> });
