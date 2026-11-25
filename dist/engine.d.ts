@@ -163,6 +163,12 @@ export interface Work<T extends string = string> extends Reader<T> {
      * being erased after this, in the same unit.
      */
     hold(person: string): Promise<void>;
+    /**
+     * Runs `fn` on a part of this unit that can be undone (ADR 0025): if it throws, everything it did is rolled back and
+     * the error comes back to the caller, while the rest of the unit carries on. For an app that tries a change to check
+     * its rules and then keeps or drops it, or keeps a set of changes only if all of them go through.
+     */
+    attempt<R>(fn: (w: Work<T>) => Promise<R>): Promise<R>;
 }
 /** A request's session: one connection, any number of units of work. */
 export interface Session<T extends string = string> {

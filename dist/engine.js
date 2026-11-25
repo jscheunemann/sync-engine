@@ -616,7 +616,12 @@ class Core {
                     throw new EngineError('bad_value', 'person');
                 await this.u.hold(person.toLowerCase());
             },
+            attempt: (fn) => this.u.savepoint((sp) => fn(this.on(sp).work())),
         };
+    }
+    /** The same unit's intents on a savepoint of it (attempt). */
+    on(u) {
+        return Object.assign(Object.create(Core.prototype), this, { u });
     }
     async record(u, type, id, lock) {
         const row = await u.getRow(type, id, lock);
