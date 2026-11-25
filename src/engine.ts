@@ -8,7 +8,7 @@
 //   const results = await session.work({ person }, (w) => w.apply(ops));       // per call
 //   ctx.waitUntil(session.close());
 //
-// The rules are version 1's (server.ts) unchanged: the contract tests run the same cases against both.
+// The rules are version 1's unchanged (its server.ts, removed at 3.0.0: ADR 0028); the contract tests ran every case against both.
 
 import { type AuditEntry, type Backend, type Cond, type Connection, isSystem, type Row, RuleError, type SchemaPlan, type Scope, type TableLayout, type Unit } from './backend.ts';
 import { conditions, cursor, EngineError, type FindOptions, fits, type Kind, out, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.ts';

@@ -1,7 +1,5 @@
 {
-  // Version 2 against another driver major (CI's driver job): everything but version 1's server, which takes the
-  // app's own driver and its types.
+  // The engine against the other driver major (CI's driver job, ADRs 0013 and 0028): the pin is 4, this checks 3.
   "extends": "./tsconfig.json",
-  "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["src/server.ts", "test/server.test.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

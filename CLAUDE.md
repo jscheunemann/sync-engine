@@ -17,8 +17,8 @@ The record sync shared by **Clearwork** (github.com/jscheunemann/clearwork) and 
   apps need the compiled JavaScript and `.d.ts` files.
 - **Nothing app-specific here.** Record types, field rules, columns, encryption and app data mapping belong to each app,
   through `RecordStore`, `ContentCrypto` and the `SyncInput` hooks (`stabilize`, `adopt`).
-- **Every rule gets a test**: the in-memory server in `test/device.test.ts`, and the real Postgres path in
-  `test/server.test.ts` (needs `TEST_DATABASE_URL`).
+- **Every rule gets a test**: the in-memory server in `test/device.test.ts`, and the engine on Postgres and SQLite in
+  `test/contract.test.ts` and `test/intents.test.ts` (Postgres needs `TEST_DATABASE_URL`).
 - Tests run TypeScript directly with Node's type stripping: relative imports use `.ts`, and no enums, namespaces or
   parameter properties.
 - No user data in logs or errors; problems carry a field and a code, never a value.
