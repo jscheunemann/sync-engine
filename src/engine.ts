@@ -188,6 +188,13 @@ export interface Work<T extends string = string> extends Reader<T> {
    * its rules and then keeps or drops it, or keeps a set of changes only if all of them go through.
    */
   attempt<R>(fn: (w: Work<T>) => Promise<R>): Promise<R>;
+  /**
+   * Seals stored content written before the app encrypted it (ADR 0026): up to `max` of the person's records stored as
+   * plain (enc 0) are sealed with the unit's crypto, in place: their content, enc and key version change, nothing else
+   * (no change number, no version), so no device sees a change. Returns how many; 0 when the crypto keeps content
+   * plain. A person's units only.
+   */
+  sealPlain(max: number): Promise<number>;
 }
 
 /** A request's session: one connection, any number of units of work. */
@@ -728,7 +735,23 @@ class Core<T extends string> {
         await this.u.hold(person.toLowerCase());
       },
       attempt: (fn) => this.u.savepoint((sp) => fn(this.on(sp).work())),
+      sealPlain: (max) => (p(), this.sealPlain(max)),
     };
+  }
+
+  private async sealPlain(max: number): Promise<number> {
+    if (!Number.isInteger(max) || max < 1 || max > FIND_MAX) throw new EngineError('bad_limit', 'max');
+    let done = 0;
+    for (const type of this.store.types) {
+      if (done >= max) break;
+      for (const row of await this.u.plainRows(type, max - done)) {
+        const sealed = await this.crypto.sealContent(type, String(row.id), (row.content ?? {}) as Row);
+        if (sealed.enc === 0) return done; // this crypto keeps content plain
+        await this.u.updateRow(type, String(row.id), { content: sealed.content, enc: sealed.enc, key_version: sealed.key_version });
+        done++;
+      }
+    }
+    return done;
   }
 
   /** The same unit's intents on a savepoint of it (attempt). */

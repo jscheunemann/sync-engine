@@ -169,6 +169,13 @@ export interface Work<T extends string = string> extends Reader<T> {
      * its rules and then keeps or drops it, or keeps a set of changes only if all of them go through.
      */
     attempt<R>(fn: (w: Work<T>) => Promise<R>): Promise<R>;
+    /**
+     * Seals stored content written before the app encrypted it (ADR 0026): up to `max` of the person's records stored as
+     * plain (enc 0) are sealed with the unit's crypto, in place: their content, enc and key version change, nothing else
+     * (no change number, no version), so no device sees a change. Returns how many; 0 when the crypto keeps content
+     * plain. A person's units only.
+     */
+    sealPlain(max: number): Promise<number>;
 }
 /** A request's session: one connection, any number of units of work. */
 export interface Session<T extends string = string> {

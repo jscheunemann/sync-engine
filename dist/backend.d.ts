@@ -141,6 +141,8 @@ export interface Unit {
     savepoint<R>(fn: (u: Unit) => Promise<R>): Promise<R>;
     /** One record's row, or null. `lock` holds it until the unit ends. */
     getRow(type: string, id: string, lock?: boolean): Promise<Row | null>;
+    /** Up to `limit` of the person's rows of a record type stored as plain (enc 0), held until the unit ends (ADR 0026). */
+    plainRows(type: string, limit: number): Promise<Row[]>;
     /** Several records' rows (those that exist), in no particular order. */
     getRows(type: string, ids: readonly string[], lock?: boolean): Promise<Row[]>;
     /** Writes new rows (each with its `rev` and `content`); returns them as stored. A refused write throws RuleError. */

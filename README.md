@@ -124,6 +124,7 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 - `w.removeWhere(type, where)` in a system unit, for a system type its intent writes: every matching row in one statement (ADR 0023).
 - `w.hold(person)` in a system unit that writes for a person: an erase of them waits for it, as it does for their own units (ADR 0024).
 - `w.attempt(fn)`: part of a unit that's undone if `fn` throws, while the rest carries on (ADR 0025): a dry run, or changes kept only if all of them go through.
+- `w.sealPlain(max)`: seals up to `max` of the person's records stored before the app encrypted content, in place, so no device sees a change (ADR 0026).
 - Refusals are `EngineError`s: a code and a field, never a value.
 
 ## Using it

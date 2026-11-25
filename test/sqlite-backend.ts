@@ -276,6 +276,7 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
       }
     },
     getRow: async (type, id) => one(type, `select * from ${declared(type)} where user_id = ? and id = ?`, [own(), id]),
+    plainRows: async (type, limit) => all(type, `select * from ${declared(type)} where user_id = ? and enc = 0 limit ?`, [own(), limit]),
     getRows: async (type, ids) => (ids.length ? all(type, `select * from ${declared(type)} where user_id = ? and id in (${ids.map(() => '?').join(', ')})`, [own(), ...ids]) : []),
     insertRows: async (type, rows) => {
       const t = declared(type);
