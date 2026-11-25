@@ -617,7 +617,25 @@ class Core {
                 await this.u.hold(person.toLowerCase());
             },
             attempt: (fn) => this.u.savepoint((sp) => fn(this.on(sp).work())),
+            sealPlain: (max) => (p(), this.sealPlain(max)),
         };
+    }
+    async sealPlain(max) {
+        if (!Number.isInteger(max) || max < 1 || max > FIND_MAX)
+            throw new EngineError('bad_limit', 'max');
+        let done = 0;
+        for (const type of this.store.types) {
+            if (done >= max)
+                break;
+            for (const row of await this.u.plainRows(type, max - done)) {
+                const sealed = await this.crypto.sealContent(type, String(row.id), (row.content ?? {}));
+                if (sealed.enc === 0)
+                    return done; // this crypto keeps content plain
+                await this.u.updateRow(type, String(row.id), { content: sealed.content, enc: sealed.enc, key_version: sealed.key_version });
+                done++;
+            }
+        }
+        return done;
     }
     /** The same unit's intents on a savepoint of it (attempt). */
     on(u) {

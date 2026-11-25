@@ -164,6 +164,10 @@ function unit(tx, layout, settings, person) {
                 : await tx `select * from ${t} where user_id = ${own()} and id = ${id}`;
             return rows[0] ?? null;
         },
+        plainRows: async (type, limit) => {
+            const t = known(type);
+            return (await tx `select * from ${t} where user_id = ${own()} and enc = 0 limit ${limit} for update`);
+        },
         getRows: async (type, ids, lock) => {
             if (!ids.length)
                 return [];

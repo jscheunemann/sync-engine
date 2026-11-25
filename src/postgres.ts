@@ -214,6 +214,10 @@ function unit(tx: Tx, layout: Layout, settings: PostgresSettings, person: string
         : await tx`select * from ${t} where user_id = ${own()} and id = ${id}`;
       return (rows[0] as Row | undefined) ?? null;
     },
+    plainRows: async (type, limit) => {
+      const t = known(type);
+      return (await tx`select * from ${t} where user_id = ${own()} and enc = 0 limit ${limit} for update`) as unknown as Row[];
+    },
     getRows: async (type, ids, lock) => {
       if (!ids.length) return [];
       const t = known(type);

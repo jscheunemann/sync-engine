@@ -283,6 +283,34 @@ describe(`contract: ${name}`, { skip }, () => {
     assert.deepEqual(await session.work({ person: P }, (w) => w.prefs.get()), { data: {}, version: 0 });
   });
 
+  test('sealPlain seals stored plain content in place: no change number, no version, a few at a time (ADR 0026)', async () => {
+    const P = uuidv7();
+    const mk = (title: string) => ({ op_id: uuidv7(), type: 'notes' as T, id: uuidv7(), base_version: null, fields: { title } });
+    const ops = [mk('one'), mk('two'), mk('three')];
+    await session.work({ person: P }, (w) => w.apply(ops));
+    const before = await session.work({ person: P }, (w) => w.changes(0, 10));
+    const sealing: ContentCrypto = {
+      vaultEnabled: async () => false,
+      openRow: async (_t, r) => (Number(r.enc) === 1 ? { ...r, content: JSON.parse(String((r.content as { c: string }).c)) } : r),
+      sealContent: async (_t, _id, c) => ({ content: { c: JSON.stringify(c) }, enc: 1, key_version: 7 }),
+      sealDoc: async (_a, d) => d,
+      openDoc: async (_a, d) => d,
+    };
+    assert.equal(await session.work({ person: P }, (w) => w.sealPlain(2)), 0, 'a crypto that keeps content plain seals nothing');
+    assert.equal(await session.work({ person: P }, (w) => w.sealPlain(2), { crypto: sealing }), 2);
+    assert.equal(await session.work({ person: P }, (w) => w.sealPlain(2), { crypto: sealing }), 1);
+    assert.equal(await session.work({ person: P }, (w) => w.sealPlain(2), { crypto: sealing }), 0, 'nothing plain left');
+    const after = await session.work({ person: P }, (w) => w.changes(0, 10), { crypto: sealing });
+    assert.deepEqual(after.changes.map((c) => [c.record.id, c.record.rev, c.record.version, c.record.title]), before.changes.map((c) => [c.record.id, c.record.rev, c.record.version, c.record.title]));
+    assert.ok(after.changes.every((c) => c.record.enc === 1 && c.record.key_version === 7));
+    assert.equal(after.next, before.next, 'no device sees a change');
+    // another person's are left alone
+    const Q = uuidv7();
+    await session.work({ person: Q }, (w) => w.apply([mk('theirs')]));
+    await session.work({ person: P }, (w) => w.sealPlain(10), { crypto: sealing });
+    assert.equal((await session.work({ person: Q }, (w) => w.changes(0, 10))).changes[0]!.record.enc, 0);
+  });
+
   test('an attempt that throws undoes its ops, their revs and their stored results; the rest of the unit lands (ADR 0025)', async () => {
     const P = uuidv7();
     const tried = { op_id: uuidv7(), type: 'notes' as T, id: uuidv7(), base_version: null, fields: { title: 'tried' } };
