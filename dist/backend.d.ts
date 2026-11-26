@@ -240,5 +240,7 @@ export interface Backend<S> {
     readonly schema?: {
         plan(settings: S, layout: Layout): Promise<SchemaPlan>;
         apply(settings: S, plan: SchemaPlan): Promise<void>;
+        /** The plan as one script that checks the database itself when it runs, safe to run again (ADR 0027). No connection. */
+        script?(settings: S, layout: Layout): string;
     };
 }

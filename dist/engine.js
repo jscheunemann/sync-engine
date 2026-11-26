@@ -92,6 +92,12 @@ export function createEngine(opts) {
     return {
         store: opts.store,
         plan: (settings) => schema().plan(settings, layout),
+        script(settings) {
+            const s = schema();
+            if (!s.script)
+                throw new EngineError('no_schema_support', backend.kind);
+            return s.script(settings, layout);
+        },
         async migrate(settings, given) {
             const now = await schema().plan(settings, layout);
             if (now.conflicts.length)

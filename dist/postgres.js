@@ -9,7 +9,7 @@
 // Tables are today's (README.md, "Tables"), adopted as they are: a table per record type, counters with next_rev(),
 // applied_ops and prefs, all in the app's schema.
 import pg from 'postgres';
-import { CATALOG_SQL, plan } from "./postgres-schema.js";
+import { CATALOG_SQL, plan, script } from "./postgres-schema.js";
 import { isSystem, RuleError } from "./backend.js";
 /** A savepoint: `savepoint` on Postgres.js 3; on 4 a nested `begin` is one, and `savepoint` is kept as long as it is. */
 const savepoint = (tx, fn) => (tx.savepoint ? tx.savepoint(fn) : tx.begin(fn));
@@ -446,6 +446,16 @@ export const postgres = {
             finally {
                 await sql.end();
             }
+        },
+        script(settings, layout) {
+            const schema = checked({ ...settings, url: settings.url || 'script' }, layout);
+            return script(layout, {
+                schema,
+                ...(settings.schemas ? { schemas: settings.schemas } : {}),
+                personSetting: settings.personSetting ?? 'app.user_id',
+                ...(settings.role ? { role: settings.role } : {}),
+                ...(settings.systemRole ? { systemRole: settings.systemRole } : {}),
+            });
         },
         async apply(settings, p) {
             checked(settings);
