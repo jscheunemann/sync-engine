@@ -242,10 +242,23 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
     const T = `${S}_script`;
     const st = { ...settings, schema: T };
     await admin.unsafe(`drop schema if exists ${T} cascade`);
+    // a script with its own begin and commit runs on a connection of its own (the driver refuses it on the pool); one
+    // stopped inside its transaction leaves that connection's transaction to roll back
+    const runScript = async (text: string) => {
+      const c = await admin.reserve();
+      try {
+        await c.unsafe(text);
+      } catch (e) {
+        await c.unsafe('rollback');
+        throw e;
+      } finally {
+        c.release();
+      }
+    };
     try {
       const text = engine.script(st);
-      await admin.unsafe(text);
-      await admin.unsafe(text);
+      await runScript(text);
+      await runScript(text);
       const after = await engine.plan(st);
       assert.deepEqual(after.steps.map((x) => x.summary), [], 'the plan has nothing left');
       assert.deepEqual(after.conflicts, []);
@@ -253,19 +266,12 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
       assert.ok(forced.length > 0 && forced.every((r) => r.f), 'what it made: forced');
       // adopting: a table already there keeps its force setting, gains a missing column; a wrong type stops it all
       await admin.unsafe(`alter table ${T}.settings no force row level security; alter table ${T}.settings drop column value`);
-      await admin.unsafe(text);
+      await runScript(text);
       const [kept] = await admin`select relforcerowsecurity as f from pg_class where oid = ${`${T}.settings`}::regclass`;
       assert.equal(kept!.f, false, 'left as it was');
       assert.equal((await admin`select count(*)::int as n from information_schema.columns where table_schema = ${T} and table_name = 'settings' and column_name = 'value'`)[0]!.n, 1);
       await admin.unsafe(`alter table ${T}.keys alter column wrapped type jsonb using to_jsonb(wrapped); drop policy engine_person on ${T}.counters`);
-      // its own connection: a script stopped inside its transaction leaves that connection's transaction to roll back
-      const c = await admin.reserve();
-      try {
-        await assert.rejects(c.unsafe(text), /engine schema conflict: [a-z0-9_]+\.keys wrapped: missing or not text/);
-      } finally {
-        await c.unsafe('rollback');
-        c.release();
-      }
+      await assert.rejects(runScript(text), /engine schema conflict: [a-z0-9_]+\.keys wrapped: missing or not text/);
       assert.equal((await admin`select count(*)::int as n from pg_policies where schemaname = ${T} and tablename = 'counters' and policyname = 'engine_person'`)[0]!.n, 0, 'one transaction: a step before the conflict didn’t stay either');
     } finally {
       await admin.unsafe(`drop schema if exists ${T} cascade`);
