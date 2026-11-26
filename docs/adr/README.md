@@ -34,4 +34,7 @@ connection to the layer that owns all of an app's data access.
 | [0022](0022-erase-one-person.md) | Erase one person | Accepted |
 | [0023](0023-remove-where.md) | Remove every matching row of a system type | Accepted |
 | [0024](0024-erase-waits-and-forgets.md) | An erase waits for the person's open work, and takes them out of the audit | Accepted |
+| [0025](0025-an-attempt-inside-a-unit.md) | An attempt inside a unit | Accepted |
+| [0026](0026-sealing-plain-content-in-place.md) | Sealing plain content in place | Accepted |
 | [0027](0027-the-plan-as-a-script.md) | The plan as a script that checks the database itself, safe to run after every migration | Accepted |
+| [0028](0028-version-3-driver-4-no-server.md) | Version 3: the engine runs on Postgres.js 4, and version 1's `./server` is gone | Accepted |
