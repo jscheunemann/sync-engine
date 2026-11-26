@@ -39,6 +39,17 @@ export declare const NONE: Catalog;
 export declare function plan(layout: Layout, have: Readonly<Record<string, Catalog>>, o: PlanOptions & {
     schemas?: Readonly<Record<string, string>>;
 }): Plan;
+/**
+ * The plan as one SQL script that needs no catalog (ADR 0027): every step the plan could have, each checking the
+ * database itself when it runs, so the script is the same for any database and safe to run again and again. A step
+ * that makes something runs only where it's missing; grants, row-level security on and `if not exists` run every time
+ * (they change nothing the second time); what the plan would report as a conflict stops the script with an error that
+ * names the table and column, never a value. Row-level security is forced only on a table the script itself made
+ * (ADR 0021). One transaction: all of it or none.
+ */
+export declare function script(layout: Layout, o: PlanOptions & {
+    schemas?: Readonly<Record<string, string>>;
+}): string;
 /** The catalog query, for a backend that runs it (Postgres's: `inspect` in postgres.ts). */
 export declare const CATALOG_SQL: {
     schema: string;

@@ -11,7 +11,7 @@
 
 import pg from 'postgres';
 import type { Kind } from './declare.ts';
-import { CATALOG_SQL, type Catalog, plan } from './postgres-schema.ts';
+import { CATALOG_SQL, type Catalog, plan, script } from './postgres-schema.ts';
 import { type TableLayout, type Backend, type Cond, type Connection, isSystem, type Layout, type Query, type Row, RuleError, type Scope, type Tombstone, type Unit } from './backend.ts';
 
 /** How to reach the database. On Cloudflare Workers, pass Hyperdrive's connection string as `url`. */
@@ -477,6 +477,16 @@ export const postgres: Backend<PostgresSettings> = {
       } finally {
         await sql.end();
       }
+    },
+    script(settings, layout) {
+      const schema = checked({ ...settings, url: settings.url || 'script' }, layout);
+      return script(layout, {
+        schema,
+        ...(settings.schemas ? { schemas: settings.schemas } : {}),
+        personSetting: settings.personSetting ?? 'app.user_id',
+        ...(settings.role ? { role: settings.role } : {}),
+        ...(settings.systemRole ? { systemRole: settings.systemRole } : {}),
+      });
     },
     async apply(settings, p) {
       checked(settings);

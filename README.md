@@ -79,6 +79,7 @@ const store: RecordStore<'tasks'> = {
 };
 const plan = await engine.plan(adminSettings);    // the steps and any conflicts, to read; changes nothing
 await engine.migrate(adminSettings, plan);        // refused if out of date or conflicted; all steps or none
+const sql = engine.script(adminSettings);          // the same plan as SQL for any database: each step checks first, safe to rerun (ADR 0027)
 ```
 
 - `w.apply(ops)` applies ops with version 1's rules; all new records, or all plain deletes, go in bulk by themselves.

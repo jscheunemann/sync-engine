@@ -216,6 +216,12 @@ export interface Engine<T extends string, S> {
    * it has conflicts. All its steps or none.
    */
   migrate(settings: S, plan: SchemaPlan): Promise<void>;
+  /**
+   * The tables the declarations need as one script for any database (ADR 0027): each step checks the database when it
+   * runs, so it can be kept with the app's migrations and run after them every time. Connects to nothing; the settings'
+   * connection is not used.
+   */
+  script(settings: S): string;
 }
 
 /** How many rows one bulk write takes. */
@@ -264,6 +270,11 @@ export function createEngine<T extends string, S>(opts: {
   return {
     store: opts.store,
     plan: (settings) => schema().plan(settings, layout),
+    script(settings) {
+      const s = schema();
+      if (!s.script) throw new EngineError('no_schema_support', backend.kind);
+      return s.script(settings, layout);
+    },
     async migrate(settings, given) {
       const now = await schema().plan(settings, layout);
       if (now.conflicts.length) throw new EngineError('schema_conflicts');

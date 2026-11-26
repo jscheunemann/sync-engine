@@ -7,7 +7,7 @@ import pg from 'postgres';
 import { EngineError, createEngine, type RecordStore, type SchemaPlan, type SystemDecl, type TypeDecl } from '../src/engine.ts';
 import { uuidv7 } from '../src/ids.ts';
 import { postgres } from '../src/postgres.ts';
-import { type Catalog, NONE, plan } from '../src/postgres-schema.ts';
+import { type Catalog, NONE, plan, script } from '../src/postgres-schema.ts';
 
 const URL_ = process.env.TEST_DATABASE_URL;
 type T = 'tasks';
@@ -170,6 +170,41 @@ describe('the plan', () => {
   });
 });
 
+describe('the plan as a script (ADR 0027)', () => {
+  test('every step the plan has from nothing, in its order, one transaction; what makes something checks first', () => {
+    const p = plan(layoutOf(), none, opts);
+    const s = script(layoutOf(), opts);
+    assert.match(s, /^-- .*\nbegin;\n/);
+    assert.match(s, /\ncommit;\n$/);
+    let at = 0;
+    for (const step of p.steps) {
+      const i = s.indexOf(`-- ${step.summary}\n`, at);
+      assert.ok(i >= at, `in order: ${step.summary}`);
+      at = i;
+    }
+    assert.match(s, /create schema if not exists "app";/);
+    assert.match(s, /if to_regclass\('"app"\."keys"'\) is null then execute 'create table "app"\."keys" /, 'a table: made only where missing');
+    assert.match(s, /if to_regprocedure\('"app"\."next_rev"\(\)'\) is null then execute 'create function/, 'a function: the same');
+    assert.match(s, /if not exists \(select from pg_policies where schemaname = 'app' and tablename = 'settings' and policyname = 'engine_read'\) then execute 'create policy/);
+    assert.match(s, /if current_setting\('engine_script\.made_\d+', true\) = 'on' then execute 'alter table "app"\."keys" force row level security;'/, 'forced only where this run made it (ADR 0021)');
+    assert.match(s, /\ngrant select, insert, update, delete on "app"\."invitations" to "app_sys";\n/, 'grants: every time, changing nothing the second');
+    assert.match(s, /if not exists \(select from information_schema\.columns where [^)]*column_name = 'wrapped'\) then execute 'alter table "app"\."keys" add column "wrapped" text;'/, 'adopting: a missing column added');
+    assert.match(s, /raise exception 'engine schema conflict: app\.keys wrapped: missing or not text'/, 'a conflict stops it, naming the column');
+    assert.doesNotMatch(s, /drop |truncate|delete from|alter column/i, 'additive only');
+  });
+
+  test('a view is checked, never made; the same with any catalog, so the script needs no database', () => {
+    let l2: unknown;
+    const spy2 = { kind: 'spy', connect: (_s: unknown, l: unknown) => ((l2 = l), { unit: async () => undefined as never, close: async () => {} }) };
+    createEngine({ store, backend: spy2, types: { accounts: { access: 'system', view: true, key: ['id'], fields: { id: 'id', email: 'text' } } } }).connect({});
+    const s = script(l2 as Parameters<typeof plan>[0], opts);
+    assert.doesNotMatch(s, /create (or replace )?view/);
+    assert.match(s, /raise exception 'engine schema conflict: app\.accounts missing_view'/);
+    assert.match(s, /grant select on "app"\."accounts" to "app_sys";/);
+    assert.equal(script(layoutOf(), opts), script(layoutOf(), opts));
+  });
+});
+
 describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABASE_URL not set' }, () => {
   const S = 'se2_made';
   let admin: ReturnType<typeof pg>;
@@ -201,6 +236,46 @@ describe('tables from declarations, on Postgres', { skip: !URL_ && 'TEST_DATABAS
     assert.deepEqual(conflicted.conflicts.map((c) => [c.table, c.column, c.issue]), [[`${S}.keys`, 'wrapped', 'type']]);
     await assert.rejects(engine.migrate(settings, conflicted), (e: unknown) => e instanceof EngineError && e.code === 'schema_conflicts');
     await admin.unsafe(`alter table ${S}.keys alter column wrapped type text using wrapped #>> '{}'`);
+  });
+
+  test('the script: run twice on its own schema, then nothing left to plan; it stops on a conflict, changing nothing (ADR 0027)', async () => {
+    const T = `${S}_script`;
+    const st = { ...settings, schema: T };
+    await admin.unsafe(`drop schema if exists ${T} cascade`);
+    // a script with its own begin and commit runs on a connection of its own (the driver refuses it on the pool); one
+    // stopped inside its transaction leaves that connection's transaction to roll back
+    const runScript = async (text: string) => {
+      const c = await admin.reserve();
+      try {
+        await c.unsafe(text);
+      } catch (e) {
+        await c.unsafe('rollback');
+        throw e;
+      } finally {
+        c.release();
+      }
+    };
+    try {
+      const text = engine.script(st);
+      await runScript(text);
+      await runScript(text);
+      const after = await engine.plan(st);
+      assert.deepEqual(after.steps.map((x) => x.summary), [], 'the plan has nothing left');
+      assert.deepEqual(after.conflicts, []);
+      const forced = await admin`select relname::text as t, relforcerowsecurity as f from pg_class where relnamespace = ${T}::regnamespace and relkind = 'r' and relrowsecurity order by 1`;
+      assert.ok(forced.length > 0 && forced.every((r) => r.f), 'what it made: forced');
+      // adopting: a table already there keeps its force setting, gains a missing column; a wrong type stops it all
+      await admin.unsafe(`alter table ${T}.settings no force row level security; alter table ${T}.settings drop column value`);
+      await runScript(text);
+      const [kept] = await admin`select relforcerowsecurity as f from pg_class where oid = ${`${T}.settings`}::regclass`;
+      assert.equal(kept!.f, false, 'left as it was');
+      assert.equal((await admin`select count(*)::int as n from information_schema.columns where table_schema = ${T} and table_name = 'settings' and column_name = 'value'`)[0]!.n, 1);
+      await admin.unsafe(`alter table ${T}.keys alter column wrapped type jsonb using to_jsonb(wrapped); drop policy engine_person on ${T}.counters`);
+      await assert.rejects(runScript(text), /engine schema conflict: [a-z0-9_]+\.keys wrapped: missing or not text/);
+      assert.equal((await admin`select count(*)::int as n from pg_policies where schemaname = ${T} and tablename = 'counters' and policyname = 'engine_person'`)[0]!.n, 0, 'one transaction: a step before the conflict didn’t stay either');
+    } finally {
+      await admin.unsafe(`drop schema if exists ${T} cascade`);
+    }
   });
 
   test('the engine runs on what it made: records, person and shared and system types, each kept to its own by row-level security', async () => {
