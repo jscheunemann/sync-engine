@@ -21,7 +21,7 @@ missing then.
     `to_regclass`, `to_regprocedure`, `pg_policies`, `information_schema.columns`.
   - What changes nothing the second time runs every time: `create schema if not exists`, grants, row-level security on,
     `create index if not exists`.
-  - Row-level security is forced only on a table this run made (a session setting the making step sets), as the plan
+  - Row-level security is forced only on a table this run made (a setting the making step sets for its transaction only, so a later run on the same connection can't mistake an adopted table for one it made), as the plan
     forces only what it makes (ADR 0021).
   - What the plan reports as a conflict (a column of another type, a view or a view's column missing) stops the script
     with `engine schema conflict: <schema>.<table> <column or issue>`, never a value.

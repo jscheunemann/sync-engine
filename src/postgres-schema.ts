@@ -134,7 +134,8 @@ function build(layout: Layout, have: Readonly<Record<string, Catalog>>, o: PlanO
   const noFn = (schema: string, fn: string, args = '') => `to_regprocedure(${lit(`${q(schema)}.${q(fn)}(${args})`)}) is null`;
   const noCol = (schema: string, table: string, col: string) =>
     `not exists (select from information_schema.columns where table_schema = ${lit(schema)} and table_name = ${lit(table)} and column_name = ${lit(col)})`;
-  // A table the script made this run, for forcing its row-level security (ADR 0021): a setting for the session.
+  // A table the script made this run, for forcing its row-level security (ADR 0021): a setting for this transaction
+  // only, so a later run on the same connection doesn't take an adopted table for one it made.
   const madeKey = new Map<string, string>();
   const made = (schema: string, table: string) => {
     const k = `${schema}.${table}`;
@@ -142,7 +143,7 @@ function build(layout: Layout, have: Readonly<Record<string, Catalog>>, o: PlanO
     return madeKey.get(k)!;
   };
   const makeTable = (summary: string, schema: string, table: string, sql: string) =>
-    step(summary, sql, noRel(schema, table), `perform set_config(${lit(made(schema, table))}, 'on', false);`);
+    step(summary, sql, noRel(schema, table), `perform set_config(${lit(made(schema, table))}, 'on', true);`);
   // A conflict the plan reports, checked by the script when it runs: it stops there, naming what (never a value).
   const check = (schema: string, table: string, cond: string, what: string) =>
     step(`Check ${schema}.${table}: ${what}`, `do $engine$ begin if ${cond} then raise exception ${lit(`engine schema conflict: ${schema}.${table} ${what}`)}; end if; end $engine$;`);

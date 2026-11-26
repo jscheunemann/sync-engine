@@ -94,7 +94,8 @@ function build(layout, have, o, run) {
     const noRel = (schema, table) => `to_regclass(${lit(`${q(schema)}.${q(table)}`)}) is null`;
     const noFn = (schema, fn, args = '') => `to_regprocedure(${lit(`${q(schema)}.${q(fn)}(${args})`)}) is null`;
     const noCol = (schema, table, col) => `not exists (select from information_schema.columns where table_schema = ${lit(schema)} and table_name = ${lit(table)} and column_name = ${lit(col)})`;
-    // A table the script made this run, for forcing its row-level security (ADR 0021): a setting for the session.
+    // A table the script made this run, for forcing its row-level security (ADR 0021): a setting for this transaction
+    // only, so a later run on the same connection doesn't take an adopted table for one it made.
     const madeKey = new Map();
     const made = (schema, table) => {
         const k = `${schema}.${table}`;
@@ -102,7 +103,7 @@ function build(layout, have, o, run) {
             madeKey.set(k, `engine_script.made_${madeKey.size + 1}`);
         return madeKey.get(k);
     };
-    const makeTable = (summary, schema, table, sql) => step(summary, sql, noRel(schema, table), `perform set_config(${lit(made(schema, table))}, 'on', false);`);
+    const makeTable = (summary, schema, table, sql) => step(summary, sql, noRel(schema, table), `perform set_config(${lit(made(schema, table))}, 'on', true);`);
     // A conflict the plan reports, checked by the script when it runs: it stops there, naming what (never a value).
     const check = (schema, table, cond, what) => step(`Check ${schema}.${table}: ${what}`, `do $engine$ begin if ${cond} then raise exception ${lit(`engine schema conflict: ${schema}.${table} ${what}`)}; end if; end $engine$;`);
     const types = layout.columns ?? {};
