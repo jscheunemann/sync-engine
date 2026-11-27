@@ -118,6 +118,7 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 - A type can be a view the app's migrations define (`view: true`): read like any type, never written (ADR 0018).
 - Postgres keeps tables in `schema`, or per type in `schemas: { type: schema }` for tables adopted elsewhere (ADR 0017).
 - `w.put(type, row, { onConflict: 'update' | 'nothing' })` for insert-or-update; `w.lock(name)` for the rest of the unit.
+- `w.putMany(type, rows, { onConflict })`: many rows checked as `put` checks each, written up to 500 a statement in one savepoint, one audit line; returns how many (ADR 0029).
 - `w.erase(person, { keep })` in a system unit whose intent declares `erase: true`: every row of one person (ADR 0022).
 - `w.removeWhere(type, where)` in a system unit, for a system type its intent writes: every matching row in one statement (ADR 0023).
 - `w.hold(person)` in a system unit that writes for a person: an erase of them waits for it, as it does for their own units (ADR 0024).

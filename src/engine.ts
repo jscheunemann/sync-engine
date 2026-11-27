@@ -159,6 +159,13 @@ export interface Work<T extends string = string> extends Reader<T> {
    * is updated with the given fields (`update`), or left as it is (`nothing`: null comes back).
    */
   put(type: string, row: Row, opts?: { onConflict?: 'update' | 'nothing' }): Promise<Row | null>;
+  /**
+   * Writes many rows of a declared type at once (ADR 0029): each checked as `put` checks it, all in one savepoint, in
+   * statements of up to BULK_ROWS rows, with one audit line. A key given twice is one row: with `update`, the later
+   * row's fields over the earlier's; with `nothing`, the first; without `onConflict`, refused like a second put.
+   * Returns how many rows were written (with `nothing`, those whose key was free). At most PUT_MANY_MAX rows a call.
+   */
+  putMany(type: string, rows: readonly Row[], opts?: { onConflict?: 'update' | 'nothing' }): Promise<number>;
   /** Holds a named lock until the unit ends, so two units doing the same thing go one after the other. */
   lock(name: string): Promise<void>;
   /**
@@ -226,6 +233,10 @@ export interface Engine<T extends string, S> {
 
 /** How many rows one bulk write takes. */
 export const BULK_ROWS = 500;
+/** How many rows one putMany takes (ADR 0029). */
+export const PUT_MANY_MAX = 10_000;
+/** Parameters one statement may carry: Postgres allows 65,535; this leaves room. */
+const MAX_PARAMS = 30_000;
 
 /** The engine for an app's records on a backend. Make it once; connect per request. */
 export function createEngine<T extends string, S>(opts: {
@@ -620,8 +631,8 @@ class Core<T extends string> {
     throw e;
   }
 
-  private async put(type: string, given: Row, opts: { onConflict?: 'update' | 'nothing' } = {}): Promise<Row | null> {
-    const { sh, person } = this.writable(type, 'put');
+  /** A put's columns: the person's column checked (or named, in a system unit), declared fields of their kind, the version's first. */
+  private async putColumns(sh: Shape, person: string | null, given: Row): Promise<Row> {
     const row = { ...given };
     let who: unknown = person;
     if (sh.access === 'person') {
@@ -634,12 +645,72 @@ class Core<T extends string> {
     const c = await this.columns(sh, row, row);
     if (sh.decl?.version && c[sh.decl.version] === undefined) c[sh.decl.version] = 1;
     if (sh.access === 'person') c[sh.personColumn] = who;
+    return c;
+  }
+
+  private onConflictOf(sh: Shape, onConflict: unknown): { key: string[]; action: 'update' | 'nothing' } | undefined {
+    if (onConflict === undefined) return undefined;
+    if (onConflict !== 'update' && onConflict !== 'nothing') throw new EngineError('bad_on_conflict');
+    return { key: [...(sh.access === 'person' ? [sh.personColumn] : []), ...sh.key], action: onConflict };
+  }
+
+  private async put(type: string, given: Row, opts: { onConflict?: 'update' | 'nothing' } = {}): Promise<Row | null> {
+    const { sh, person } = this.writable(type, 'put');
+    const c = await this.putColumns(sh, person, given);
     try {
-      if (opts.onConflict !== undefined && !['update', 'nothing'].includes(opts.onConflict)) throw new EngineError('bad_on_conflict');
-      const key = [...(sh.access === 'person' ? [sh.personColumn] : []), ...sh.key];
-      const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c, opts.onConflict ? { key, action: opts.onConflict } : undefined));
+      const conflict = this.onConflictOf(sh, opts.onConflict);
+      const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c, conflict));
       await this.audit(sh, 'put', stored ? 1 : 0);
       return stored ? this.outRow(sh, stored) : null;
+    } catch (e) {
+      this.refused(e);
+    }
+  }
+
+  private async putMany(type: string, given: readonly Row[], opts: { onConflict?: 'update' | 'nothing' } = {}): Promise<number> {
+    const { sh, person } = this.writable(type, 'put');
+    const conflict = this.onConflictOf(sh, opts.onConflict);
+    if (!Array.isArray(given)) throw new EngineError('bad_rows');
+    if (given.length > PUT_MANY_MAX) throw new EngineError('too_many_rows');
+    // One row a key (a statement can't write a key twice): with update the later fields go over the earlier ones, with
+    // nothing the first stays. Without onConflict every row goes in, and a repeated key is refused, as a second put is.
+    const rows: Row[] = [];
+    const byKey = new Map<string, number>();
+    for (const g of given) {
+      if (!g || typeof g !== 'object' || Array.isArray(g)) throw new EngineError('bad_rows');
+      const c = await this.putColumns(sh, person, g);
+      if (!conflict) {
+        rows.push(c);
+        continue;
+      }
+      const k = JSON.stringify(conflict.key.map((n) => c[n] ?? null));
+      const at = byKey.get(k);
+      if (at === undefined) {
+        byKey.set(k, rows.length);
+        rows.push(c);
+      } else if (conflict.action === 'update') rows[at] = { ...rows[at], ...c };
+    }
+    // Rows with the same columns go together, so an upsert updates only what each row gave.
+    const groups = new Map<string, Row[]>();
+    for (const r of rows) {
+      const names = Object.keys(r).sort().join(',');
+      const g = groups.get(names);
+      if (g) g.push(r);
+      else groups.set(names, [r]);
+    }
+    try {
+      const n = rows.length
+        ? await this.u.savepoint(async (sp) => {
+            let written = 0;
+            for (const [names, list] of groups) {
+              const size = Math.max(1, Math.min(BULK_ROWS, Math.floor(MAX_PARAMS / names.split(',').length)));
+              for (let i = 0; i < list.length; i += size) written += await sp.insertMany(sh.table, list.slice(i, i + size), conflict);
+            }
+            return written;
+          })
+        : 0;
+      await this.audit(sh, 'put', n);
+      return n;
     } catch (e) {
       this.refused(e);
     }
@@ -732,6 +803,7 @@ class Core<T extends string> {
       changes: (since, limit) => (p(), this.changes(since, limit)),
       prefs: { get: () => (p(), this.getPrefs()), put: (data, base) => (p(), this.putPrefs(data, base)) },
       put: (type, row, opts) => this.put(type, row, opts),
+      putMany: (type, rows, opts) => this.putMany(type, rows, opts),
       erase: (person, opts) => this.erase(person, opts?.keep ?? []),
       lock: async (name) => {
         if (typeof name !== 'string' || !name || name.length > 200) throw new EngineError('bad_lock');

@@ -138,6 +138,15 @@ export interface Work<T extends string = string> extends Reader<T> {
     put(type: string, row: Row, opts?: {
         onConflict?: 'update' | 'nothing';
     }): Promise<Row | null>;
+    /**
+     * Writes many rows of a declared type at once (ADR 0029): each checked as `put` checks it, all in one savepoint, in
+     * statements of up to BULK_ROWS rows, with one audit line. A key given twice is one row: with `update`, the later
+     * row's fields over the earlier's; with `nothing`, the first; without `onConflict`, refused like a second put.
+     * Returns how many rows were written (with `nothing`, those whose key was free). At most PUT_MANY_MAX rows a call.
+     */
+    putMany(type: string, rows: readonly Row[], opts?: {
+        onConflict?: 'update' | 'nothing';
+    }): Promise<number>;
     /** Holds a named lock until the unit ends, so two units doing the same thing go one after the other. */
     lock(name: string): Promise<void>;
     /**
@@ -206,6 +215,8 @@ export interface Engine<T extends string, S> {
 }
 /** How many rows one bulk write takes. */
 export declare const BULK_ROWS = 500;
+/** How many rows one putMany takes (ADR 0029). */
+export declare const PUT_MANY_MAX = 10000;
 /** The engine for an app's records on a backend. Make it once; connect per request. */
 export declare function createEngine<T extends string, S>(opts: {
     store: RecordStore<T>;

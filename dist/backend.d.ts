@@ -188,6 +188,14 @@ export interface Unit {
         key: readonly string[];
         action: 'update' | 'nothing';
     }): Promise<Row | null>;
+    /**
+     * Writes many rows of one table in one statement (ADR 0029): every row has the same columns and no two the same key.
+     * Returns how many were written (with `nothing`, those whose key was free). A refused write throws RuleError.
+     */
+    insertMany(table: string, rows: readonly Row[], onConflict?: {
+        key: readonly string[];
+        action: 'update' | 'nothing';
+    }): Promise<number>;
     /** Groups and measures of the rows a summary keeps. */
     summarize(q: SummaryQuery): Promise<Row[]>;
     /** Holds a named lock until the unit ends: another unit asking for the same name waits. */

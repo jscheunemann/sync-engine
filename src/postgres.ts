@@ -139,6 +139,16 @@ function cond(tx: Tx, c: Cond, cs: Cols): Frag {
   }
 }
 
+/** An insert's `on conflict`: the other written columns updated (`update`), or the row left as it is (`nothing`). */
+function conflictClause(tx: Tx, written: readonly string[], onConflict?: { key: readonly string[]; action: 'update' | 'nothing' }): Frag {
+  if (!onConflict) return tx``;
+  const list = onConflict.key.map((n) => tx`${tx(n)}`).reduce((a, b) => tx`${a}, ${b}`);
+  const rest = written.filter((k) => !onConflict.key.includes(k));
+  return onConflict.action === 'update' && rest.length
+    ? tx`on conflict (${list}) do update set ${rest.map((k) => tx`${tx(k)} = excluded.${tx(k)}`).reduce((a, b) => tx`${a}, ${b}`)}`
+    : tx`on conflict (${list}) do nothing`;
+}
+
 const and = (tx: Tx, parts: Frag[]) => (parts.length ? parts.reduce((a, b) => tx`${a} and ${b}`) : tx`true`);
 const or = (tx: Tx, parts: Frag[]) => parts.reduce((a, b) => tx`(${a}) or (${b})`);
 
@@ -323,18 +333,21 @@ function unit(tx: Tx, layout: Layout, settings: PostgresSettings, person: string
     insert: async (name, row, onConflict) => {
       const t = declared(name);
       const c = cols(tx, row, kindsOf(name));
-      const list = (names: readonly string[]) => names.map((n) => tx`${tx(n)}`).reduce((a, b) => tx`${a}, ${b}`);
-      let conflict = tx``;
-      if (onConflict) {
-        const rest = Object.keys(c).filter((k) => !onConflict.key.includes(k));
-        conflict =
-          onConflict.action === 'update' && rest.length
-            ? tx`on conflict (${list(onConflict.key)}) do update set ${rest.map((k) => tx`${tx(k)} = excluded.${tx(k)}`).reduce((a, b) => tx`${a}, ${b}`)}`
-            : tx`on conflict (${list(onConflict.key)}) do nothing`;
-      }
       try {
-        const [stored] = await tx`insert into ${t} ${tx(c as never)} ${conflict} returning *`;
+        const [stored] = await tx`insert into ${t} ${tx(c as never)} ${conflictClause(tx, Object.keys(c), onConflict)} returning *`;
         return (stored as Row | undefined) ?? null;
+      } catch (e) {
+        throw rule(e);
+      }
+    },
+    insertMany: async (name, rows, onConflict) => {
+      if (!rows.length) return 0;
+      const t = declared(name);
+      const list = rows.map((r) => cols(tx, r, kindsOf(name)));
+      try {
+        // `returning 1`: only how many, so a big batch doesn't come back over the wire
+        const stored = await tx`insert into ${t} ${tx(list as never)} ${conflictClause(tx, Object.keys(list[0]!), onConflict)} returning 1 as n`;
+        return stored.length;
       } catch (e) {
         throw rule(e);
       }
