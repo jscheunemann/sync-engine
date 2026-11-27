@@ -347,6 +347,20 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
       }
       return one(table, `insert into ${declared(table)} (${names.map(q).join(', ')}) values (${names.map(() => '?').join(', ')})${conflict} returning *`, names.map((n) => enc(k[n], row[n])));
     },
+    insertMany: async (table, rows, onConflict) => {
+      if (!rows.length) return 0;
+      const k = kindsOf(table);
+      const names = Object.keys(rows[0]!);
+      let conflict = '';
+      if (onConflict) {
+        const rest = names.filter((n) => !onConflict.key.includes(n));
+        conflict = ` on conflict (${onConflict.key.map(q).join(', ')}) do ${onConflict.action === 'update' && rest.length ? `update set ${rest.map((n) => `${q(n)} = excluded.${q(n)}`).join(', ')}` : 'nothing'}`;
+      }
+      // one statement, as on Postgres: a refused row undoes the whole batch
+      const values = rows.map(() => `(${names.map(() => '?').join(', ')})`).join(', ');
+      const params = rows.flatMap((r) => names.map((n) => enc(k[n], r[n])));
+      return all(table, `insert into ${declared(table)} (${names.map(q).join(', ')}) values ${values}${conflict} returning 1 as n`, params).length;
+    },
     summarize: async (sq) => summarize(sq),
     lock: async () => {}, // one writer at a time already
     erase: async (p, types) => {

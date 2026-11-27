@@ -450,6 +450,61 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await code(as(A)((w) => w.lock('')), 'bad_lock');
     });
 
+    test('putMany: many rows at once, each checked as put checks it, in statements of up to 500 (ADR 0029)', async () => {
+      const P = uuidv7();
+      const day = (i: number) => new Date(Date.UTC(2020, 0, 1) + i * 864e5).toISOString().slice(0, 10);
+      // more than one statement's worth
+      assert.equal(await as(P)((w) => w.putMany('days', Array.from({ length: 1200 }, (_, i) => ({ day: day(i), n: i })))), 1200);
+      assert.equal(await as(P)((w) => w.count('days')), 1200);
+      assert.equal(await as(B)((w) => w.count('days', { where: { day: day(0) } })), 0, 'the rows are the unit’s person’s');
+      // update: only the given fields change; a key twice is one row, the later fields over the earlier
+      assert.equal(await as(P)((w) => w.putMany('days', [{ day: day(0), n: 5 }, { day: day(0), n: 6 }, { day: '2030-01-01', n: 1 }], { onConflict: 'update' })), 2);
+      assert.equal((await as(P)((w) => w.find('days', { where: { day: day(0) } }))).rows[0]!.n, 6);
+      // nothing: only free keys are written, and counted
+      assert.equal(await as(P)((w) => w.putMany('days', [{ day: day(1), n: 99 }, { day: '2031-01-01', n: 1 }], { onConflict: 'nothing' })), 1);
+      assert.equal((await as(P)((w) => w.find('days', { where: { day: day(1) } }))).rows[0]!.n, 1);
+      // a taken key without onConflict refuses the whole call: nothing of it stays, and the unit carries on
+      await as(P)(async (w) => {
+        await code(w.putMany('days', [{ day: '2032-01-01', n: 1 }, { day: day(2), n: 1 }]), 'refused');
+        assert.equal(await w.count('days', { where: { day: { gte: '2032-01-01' } } }), 0);
+        assert.equal(await w.putMany('days', [{ day: '2032-01-01', n: 1 }]), 1);
+      });
+      // every row checked before anything is written
+      await code(as(P)((w) => w.putMany('days', [{ day: '2033-01-01', n: 1 }, { day: '2026-02-30', n: 1 }])), 'bad_value', 'day');
+      await code(as(P)((w) => w.putMany('days', [{ day: '2033-01-01', n: 1, color: 'red' }])), 'unknown_field', 'color');
+      await code(as(P)((w) => w.putMany('days', [{ day: '2033-01-01', n: 1, user_id: B }])), 'not_yours', 'user_id');
+      assert.equal(await as(P)((w) => w.count('days', { where: { day: '2033-01-01' } })), 0);
+      await code(as(P)((w) => w.putMany('days', 'x' as never)), 'bad_rows');
+      await code(as(P)((w) => w.putMany('days', [null as never])), 'bad_rows');
+      await code(as(P)((w) => w.putMany('days', [], { onConflict: 'replace' as never })), 'bad_on_conflict');
+      await code(as(P)((w) => w.putMany('days', Array.from({ length: 10_001 }, (_, i) => ({ day: day(i % 300), n: i })))), 'too_many_rows');
+      await code(as(P)((w) => w.putMany('membership', [{ since: '2026-01-01', via: 'self' }])), 'system_only', 'membership');
+      await code(as(P)((w) => w.putMany('notes', [{}])), 'records_use_apply', 'notes');
+      await code(as(P)((w) => w.putMany('timed', [{ id: uuidv7(), a: 'x', ms: 1 }])), 'read_only', 'timed');
+      assert.equal(await as(P)((w) => w.putMany('days', [])), 0);
+      // sealed fields are sealed and versions start at 1, as with put
+      const id = uuidv7();
+      assert.equal(await as(P)((w) => w.putMany('docs', [{ id, title: 'bulk', body: { text: 'secret words' } }])), 1);
+      assert.deepEqual((await as(P)((w) => w.find('docs', { where: { id } }))).rows.map((x) => [x.body, x.version]), [[{ text: 'secret words' }, 1]]);
+      assert.equal(typeof ((await r.raw('docs')).find((x) => x.id === id)!.body as Row).sealed, 'string');
+      // rows that give different fields: each updates only its own
+      await sys('analytics')((w) => w.putMany('viewers', [
+        { viewer: 'm1', first_seen: '2026-11-01T00:00:00.000Z', os: 'ios' },
+        { viewer: 'm2', first_seen: '2026-11-02T00:00:00.000Z', os: 'ios' },
+      ]));
+      await sys('analytics')((w) => w.putMany('viewers', [{ viewer: 'm1', os: 'android' }, { viewer: 'm2', last_seen: '2026-11-20T00:00:00.000Z' }], { onConflict: 'update' }));
+      const m = (await sys('analytics')((w) => w.find('viewers', { where: { viewer: { in: ['m1', 'm2'] } } }))).rows;
+      assert.deepEqual(m.map((x) => [x.viewer, x.first_seen, x.os, x.last_seen]), [
+        ['m1', '2026-11-01T00:00:00.000Z', 'android', null],
+        ['m2', '2026-11-02T00:00:00.000Z', 'ios', '2026-11-20T00:00:00.000Z'],
+      ]);
+      // a system unit's putMany is one audit line, with the count and no values
+      const before = (await r.audit()).length;
+      await sys('analytics')((w) => w.putMany('viewers', Array.from({ length: 30 }, (_, i) => ({ viewer: `bulk${i}`, os: 'ios' }))));
+      const lines = (await r.audit()).slice(before);
+      assert.deepEqual(lines.map((x) => [x.intent, x.type, x.action, Number(x.rows)]), [['analytics', 'viewers', 'put', 30]]);
+    });
+
     test('errors carry a code and a field, never a value', async () => {
       const values = ['private text 1', 'someone-else@example.com'];
       // One at a time: a refusal started early would go unhandled while the one before it is awaited.

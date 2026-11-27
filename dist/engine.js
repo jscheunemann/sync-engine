@@ -50,6 +50,10 @@ export class CursorExpired extends Error {
 }
 /** How many rows one bulk write takes. */
 export const BULK_ROWS = 500;
+/** How many rows one putMany takes (ADR 0029). */
+export const PUT_MANY_MAX = 10_000;
+/** Parameters one statement may carry: Postgres allows 65,535; this leaves room. */
+const MAX_PARAMS = 30_000;
 /** The engine for an app's records on a backend. Make it once; connect per request. */
 export function createEngine(opts) {
     const { backend } = opts;
@@ -478,8 +482,8 @@ class Core {
             throw new EngineError(e.kind === 'reference' ? 'reference' : 'refused', e.rule || undefined);
         throw e;
     }
-    async put(type, given, opts = {}) {
-        const { sh, person } = this.writable(type, 'put');
+    /** A put's columns: the person's column checked (or named, in a system unit), declared fields of their kind, the version's first. */
+    async putColumns(sh, person, given) {
         const row = { ...given };
         let who = person;
         if (sh.access === 'person') {
@@ -497,13 +501,80 @@ class Core {
             c[sh.decl.version] = 1;
         if (sh.access === 'person')
             c[sh.personColumn] = who;
+        return c;
+    }
+    onConflictOf(sh, onConflict) {
+        if (onConflict === undefined)
+            return undefined;
+        if (onConflict !== 'update' && onConflict !== 'nothing')
+            throw new EngineError('bad_on_conflict');
+        return { key: [...(sh.access === 'person' ? [sh.personColumn] : []), ...sh.key], action: onConflict };
+    }
+    async put(type, given, opts = {}) {
+        const { sh, person } = this.writable(type, 'put');
+        const c = await this.putColumns(sh, person, given);
         try {
-            if (opts.onConflict !== undefined && !['update', 'nothing'].includes(opts.onConflict))
-                throw new EngineError('bad_on_conflict');
-            const key = [...(sh.access === 'person' ? [sh.personColumn] : []), ...sh.key];
-            const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c, opts.onConflict ? { key, action: opts.onConflict } : undefined));
+            const conflict = this.onConflictOf(sh, opts.onConflict);
+            const stored = await this.u.savepoint((sp) => sp.insert(sh.table, c, conflict));
             await this.audit(sh, 'put', stored ? 1 : 0);
             return stored ? this.outRow(sh, stored) : null;
+        }
+        catch (e) {
+            this.refused(e);
+        }
+    }
+    async putMany(type, given, opts = {}) {
+        const { sh, person } = this.writable(type, 'put');
+        const conflict = this.onConflictOf(sh, opts.onConflict);
+        if (!Array.isArray(given))
+            throw new EngineError('bad_rows');
+        if (given.length > PUT_MANY_MAX)
+            throw new EngineError('too_many_rows');
+        // One row a key (a statement can't write a key twice): with update the later fields go over the earlier ones, with
+        // nothing the first stays. Without onConflict every row goes in, and a repeated key is refused, as a second put is.
+        const rows = [];
+        const byKey = new Map();
+        for (const g of given) {
+            if (!g || typeof g !== 'object' || Array.isArray(g))
+                throw new EngineError('bad_rows');
+            const c = await this.putColumns(sh, person, g);
+            if (!conflict) {
+                rows.push(c);
+                continue;
+            }
+            const k = JSON.stringify(conflict.key.map((n) => c[n] ?? null));
+            const at = byKey.get(k);
+            if (at === undefined) {
+                byKey.set(k, rows.length);
+                rows.push(c);
+            }
+            else if (conflict.action === 'update')
+                rows[at] = { ...rows[at], ...c };
+        }
+        // Rows with the same columns go together, so an upsert updates only what each row gave.
+        const groups = new Map();
+        for (const r of rows) {
+            const names = Object.keys(r).sort().join(',');
+            const g = groups.get(names);
+            if (g)
+                g.push(r);
+            else
+                groups.set(names, [r]);
+        }
+        try {
+            const n = rows.length
+                ? await this.u.savepoint(async (sp) => {
+                    let written = 0;
+                    for (const [names, list] of groups) {
+                        const size = Math.max(1, Math.min(BULK_ROWS, Math.floor(MAX_PARAMS / names.split(',').length)));
+                        for (let i = 0; i < list.length; i += size)
+                            written += await sp.insertMany(sh.table, list.slice(i, i + size), conflict);
+                    }
+                    return written;
+                })
+                : 0;
+            await this.audit(sh, 'put', n);
+            return n;
         }
         catch (e) {
             this.refused(e);
@@ -606,6 +677,7 @@ class Core {
             changes: (since, limit) => (p(), this.changes(since, limit)),
             prefs: { get: () => (p(), this.getPrefs()), put: (data, base) => (p(), this.putPrefs(data, base)) },
             put: (type, row, opts) => this.put(type, row, opts),
+            putMany: (type, rows, opts) => this.putMany(type, rows, opts),
             erase: (person, opts) => this.erase(person, opts?.keep ?? []),
             lock: async (name) => {
                 if (typeof name !== 'string' || !name || name.length > 200)
