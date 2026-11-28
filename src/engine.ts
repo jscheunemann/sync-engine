@@ -559,7 +559,12 @@ class Core<T extends string> {
         kinds.set(as, 'integer');
         return { as, fn, where };
       }
-      const f = field((m as Record<string, unknown>)[fn] as string);
+      const name = (m as Record<string, unknown>)[fn] as string;
+      // a declared type's number columns can be measured without being query fields (ADR 0031): a measure reads the
+      // rows the conditions keep, so it needs no index; filters, order, groups and distinct still need query fields
+      const plain = fn !== 'distinct' && !sh.record && !sh.queryable.has(name) && typeof name === 'string' && Object.hasOwn(sh.fields, name)
+        && (sh.fields[name] === 'number' || sh.fields[name] === 'integer');
+      const f = plain ? { col: name, kind: sh.fields[name]! } : field(name);
       if (['sum', 'avg', 'percentile'].includes(fn) && f.kind !== 'number' && f.kind !== 'integer') throw new EngineError('not_a_number', as);
       const p = (m as { p?: number }).p;
       if (fn === 'percentile' && !(typeof p === 'number' && p > 0 && p <= 1)) throw new EngineError('bad_measure', as);

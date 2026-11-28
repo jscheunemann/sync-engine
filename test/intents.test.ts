@@ -391,6 +391,24 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await code(sys('analytics')((w) => w.summarize('events', { by: [{ part: 'year', field: 't', zone: 'Mars/Olympus' }], measures: n })), 'bad_zone', 'zone');
     });
 
+    test('a summary measures any number column of a declared type, query field or not, over a range (ADR 0031)', async () => {
+      const P = uuidv7();
+      for (const [day, n] of [['2026-03-01', 2], ['2026-03-15', 4], ['2026-04-02', 9], ['2026-05-20', 100]] as const) await as(P)((w) => w.put('days', { day, n }));
+      // n isn't a query field of days: summed, averaged, its lowest, highest and median, by month, in a range
+      const rows = await as(P)((w) => w.summarize('days', { where: { day: { gte: '2026-03-01', lte: '2026-04-30' } }, by: [{ part: 'month', field: 'day', as: 'm' }],
+        measures: { total: { sum: 'n' }, mean: { avg: 'n' }, lo: { min: 'n' }, hi: { max: 'n' }, mid: { percentile: 'n', p: 0.5 } }, order: 'm' }));
+      assert.deepEqual(rows.map((r) => ({ ...r, mean: Number(r.mean), mid: Number(r.mid) })),
+        [{ m: '2026-03', total: 6, mean: 3, lo: 2, hi: 4, mid: 3 }, { m: '2026-04', total: 9, mean: 9, lo: 9, hi: 9, mid: 9 }]);
+      // still query fields only: filtering, grouping, ordering and distinct by it
+      await code(as(P)((w) => w.summarize('days', { where: { n: 2 }, measures: { c: { count: true } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.summarize('days', { by: ['n'], measures: { c: { count: true } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.summarize('days', { measures: { d: { distinct: 'n' } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.find('days', { order: 'n' })), 'not_queryable', 'n');
+      // a column that isn't declared, or isn't a number, is refused as before
+      await code(as(P)((w) => w.summarize('days', { measures: { s: { sum: 'ghost' } } })), 'not_queryable', 'ghost');
+      await code(as(P)((w) => w.summarize('membership', { measures: { s: { max: 'via' } } })), 'not_queryable', 'via');
+    });
+
     test('a view: read like any type (find, count, summarize), never written', async () => {
       const page = await sys('analytics')((w) => w.find('timed', { where: { a: 'dwell' } }));
       assert.deepEqual(page.rows.map((x) => x.ms).sort(), [1000, 3000]);
