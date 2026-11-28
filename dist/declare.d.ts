@@ -63,7 +63,7 @@ export interface SystemDecl {
      */
     erase?: true;
 }
-/** A condition on one field: a value (equals), or one operator. */
+/** A condition on one field: a value (equals), one operator, or a range: a lower and an upper bound (ADR 0031). */
 export type Match = string | number | boolean | null | {
     in: readonly unknown[];
 } | {
@@ -82,6 +82,18 @@ export type Match = string | number | boolean | null | {
     is: null;
 } | {
     not: null;
+} | {
+    gt: unknown;
+    lt: unknown;
+} | {
+    gt: unknown;
+    lte: unknown;
+} | {
+    gte: unknown;
+    lt: unknown;
+} | {
+    gte: unknown;
+    lte: unknown;
 };
 export type Where = Readonly<Record<string, Match>>;
 export interface FindOptions {

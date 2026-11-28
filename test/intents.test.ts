@@ -131,7 +131,14 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.equal(await as(P)((w) => w.count('docs', { where: { done: true } })), 12);
       assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { is: null } } })), 6);
       assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { not: null }, title: { in: ['t1', 't2'] } } })), 8);
-      assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gte: 10, lt: 20 } as never } })).catch((e) => e.code), 'bad_match', 'one operator per field');
+      // a range: one lower and one upper bound (ADR 0031), in finds, counts and summaries alike
+      assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gte: 10, lt: 20 } } })), 8);
+      assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gt: 10, lte: 20 } } })), 7, '20 is a null rank');
+      assert.deepEqual((await as(P)((w) => w.find('docs', { where: { rank: { gte: 18, lte: 19 } }, order: 'rank' }))).rows.map((r) => r.rank), [18, 19]);
+      assert.deepEqual(await as(P)((w) => w.summarize('docs', { where: { rank: { gte: 10, lt: 20 } }, measures: { s: { sum: 'rank' } } })), [{ s: 117 }]);
+      for (const bad of [{ gt: 1, gte: 2 }, { lt: 1, lte: 2 }, { gte: 1, in: [2] }, { gte: 1, lt: 5, ne: 3 }, {}])
+        assert.equal(await as(P)((w) => w.count('docs', { where: { rank: bad as never } })).catch((e) => e.code), 'bad_match', JSON.stringify(bad));
+      await code(as(P)((w) => w.count('docs', { where: { rank: { gte: 1, lt: 'x' } } })), 'bad_value', 'rank');
       assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gte: 10 }, title: { ne: 't0' } } })), 8);
       for (const order of ['rank', '-rank', 'title', '-id', undefined]) {
         const seen: Row[] = [];
@@ -382,6 +389,24 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await code(as(A)((w) => w.summarize('days', { by: [{ part: 'hour', field: 'day' }], measures: n })), 'not_a_time', 'day');
       await code(sys('analytics')((w) => w.summarize('events', { by: [{ part: 'year', field: 't' }], measures: n })), 'bad_zone', 'zone');
       await code(sys('analytics')((w) => w.summarize('events', { by: [{ part: 'year', field: 't', zone: 'Mars/Olympus' }], measures: n })), 'bad_zone', 'zone');
+    });
+
+    test('a summary measures any number column of a declared type, query field or not, over a range (ADR 0031)', async () => {
+      const P = uuidv7();
+      for (const [day, n] of [['2026-03-01', 2], ['2026-03-15', 4], ['2026-04-02', 9], ['2026-05-20', 100]] as const) await as(P)((w) => w.put('days', { day, n }));
+      // n isn't a query field of days: summed, averaged, its lowest, highest and median, by month, in a range
+      const rows = await as(P)((w) => w.summarize('days', { where: { day: { gte: '2026-03-01', lte: '2026-04-30' } }, by: [{ part: 'month', field: 'day', as: 'm' }],
+        measures: { total: { sum: 'n' }, mean: { avg: 'n' }, lo: { min: 'n' }, hi: { max: 'n' }, mid: { percentile: 'n', p: 0.5 } }, order: 'm' }));
+      assert.deepEqual(rows.map((r) => ({ ...r, mean: Number(r.mean), mid: Number(r.mid) })),
+        [{ m: '2026-03', total: 6, mean: 3, lo: 2, hi: 4, mid: 3 }, { m: '2026-04', total: 9, mean: 9, lo: 9, hi: 9, mid: 9 }]);
+      // still query fields only: filtering, grouping, ordering and distinct by it
+      await code(as(P)((w) => w.summarize('days', { where: { n: 2 }, measures: { c: { count: true } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.summarize('days', { by: ['n'], measures: { c: { count: true } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.summarize('days', { measures: { d: { distinct: 'n' } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.find('days', { order: 'n' })), 'not_queryable', 'n');
+      // a column that isn't declared, or isn't a number, is refused as before
+      await code(as(P)((w) => w.summarize('days', { measures: { s: { sum: 'ghost' } } })), 'not_queryable', 'ghost');
+      await code(as(P)((w) => w.summarize('membership', { measures: { s: { max: 'via' } } })), 'not_queryable', 'via');
     });
 
     test('a view: read like any type (find, count, summarize), never written', async () => {

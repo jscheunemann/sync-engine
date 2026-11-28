@@ -85,6 +85,15 @@ export function conditions(where, fields) {
             conds.push({ col: f.col, op: 'eq', value: check(m) });
         else {
             const keys = Object.keys(m);
+            // a range (ADR 0031): one lower bound and one upper bound, both kept
+            if (keys.length === 2) {
+                const lower = keys.filter((k) => k === 'gt' || k === 'gte'), upper = keys.filter((k) => k === 'lt' || k === 'lte');
+                if (lower.length !== 1 || upper.length !== 1)
+                    throw new EngineError('bad_match', name);
+                for (const op of [lower[0], upper[0]])
+                    conds.push({ col: f.col, op, value: check(m[op]) });
+                continue;
+            }
             const op = keys[0];
             if (keys.length !== 1 || !OPS.includes(op))
                 throw new EngineError('bad_match', name);

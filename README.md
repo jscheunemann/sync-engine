@@ -105,7 +105,9 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 ```
 
 - `w.find(type, { where, order, limit, after })` → `{ rows, next }`; `w.count(type, { where })`. A system unit may also
-  filter, order and group a person type by its person column.
+  filter, order and group a person type by its person column. A `where` takes, per field, a value, one operator (`in`,
+  `nin`, `ne`, `gt`, `gte`, `lt`, `lte`, `is: null`, `not: null`), or a range: one lower and one upper bound, such as
+  `{ gte: '2025-01-01', lte: '2025-12-31' }` (ADR 0031).
 - `w.put(type, row)`, `w.update(type, key, changes, version?)` (`applied`, `conflict` with the current row, or
   `not_found`), `w.remove(type, key)`.
 - `person` types are each person's; `shared` types are read by anyone and written by system intents; `system` types
@@ -113,7 +115,8 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
   `<schema>.engine_audit` (no values).
 - `w.summarize(type, { where, by, measures, order, limit })`: groups (fields, JSON `paths`, `{ day, zone }`, or a date's
   part, `{ part, field, zone? }`: year, quarter, month, ISO week, weekday, or a time's hour, ADR 0030) with `count`,
-  `distinct`, `sum`, `avg`, `min`, `max` and `percentile`, each with its own `where` if wanted (ADR 0016).
+  `distinct`, `sum`, `avg`, `min`, `max` and `percentile`, each with its own `where` if wanted (ADR 0016). On a declared
+  type, `sum`, `avg`, `min`, `max` and `percentile` take any number column, a query field or not (ADR 0031).
 - Kinds include `date` (a local day, `YYYY-MM-DD`); a person type with `writes: 'system'` is read by each person and
   written only by system intents (ADR 0019).
 - A type can be a view the app's migrations define (`view: true`): read like any type, never written (ADR 0018).
