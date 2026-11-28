@@ -343,6 +343,8 @@ interface Shape {
   key: readonly string[];
   fields: Readonly<Record<string, Kind>>;
   queryable: Map<string, { col: string; kind: Kind }>;
+  /** number columns that aren't query fields: a find, count or summary may bound them (ADR 0032) */
+  ranged: Map<string, { col: string; kind: Kind }>;
   decl?: TypeDecl;
 }
 
@@ -424,7 +426,7 @@ class Core<T extends string> {
       const fields = this.store.type(type).queryable;
       const queryable = new Map(Object.entries(fields).map(([n, k]) => [n, { col: n, kind: k }]));
       if (this.person === null) queryable.set('user_id', { col: 'user_id', kind: 'id' });
-      return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable };
+      return { name: type, table: type, record: true, access: 'person', personColumn: 'user_id', key: ['id'], fields, queryable, ranged: new Map() };
     }
     const d = this.types[type];
     if (!d) throw new EngineError('unknown_type', type);
@@ -433,7 +435,9 @@ class Core<T extends string> {
     for (const [n, x] of Object.entries(d.paths ?? {})) queryable.set(n, { col: n, kind: x.kind });
     // A system unit reaches every person's rows of a person type, so it may filter, order and group by whose they are.
     if (d.access === 'person' && this.person === null) queryable.set(d.personColumn ?? 'user_id', { col: d.personColumn ?? 'user_id', kind: 'id' });
-    return { name: type, table: type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, decl: d };
+    const ranged = new Map<string, { col: string; kind: Kind }>();
+    for (const [n, k] of Object.entries(d.fields)) if ((k === 'number' || k === 'integer') && !queryable.has(n) && !(d.sealed ?? []).includes(n)) ranged.set(n, { col: n, kind: k });
+    return { name: type, table: type, record: false, access: d.access, personColumn: d.personColumn ?? 'user_id', key: d.key, fields: d.fields, queryable, ranged, decl: d };
   }
 
   /** Whether this unit may read or write a type (ADR 0009); the person filter a query takes when it may. */
@@ -474,7 +478,7 @@ class Core<T extends string> {
   private async find(u: Unit, type: string, opts: FindOptions = {}): Promise<Page<Row>> {
     const sh = this.shape(type);
     const person = this.allow(sh, false);
-    const where = conditions(opts.where, sh.queryable);
+    const where = conditions(opts.where, sh.queryable, sh.ranged);
     let order: { col: string; desc: boolean } | undefined;
     if (opts.order !== undefined) {
       const desc = opts.order.startsWith('-');
@@ -503,7 +507,7 @@ class Core<T extends string> {
   private async count(u: Unit, type: string, opts: { where?: Where } = {}): Promise<number> {
     const sh = this.shape(type);
     const person = this.allow(sh, false);
-    const n = await u.count({ table: sh.table, person, personColumn: sh.personColumn, where: conditions(opts.where, sh.queryable), key: sh.key });
+    const n = await u.count({ table: sh.table, person, personColumn: sh.personColumn, where: conditions(opts.where, sh.queryable, sh.ranged), key: sh.key });
     await this.audit(sh, 'count', n);
     return n;
   }
@@ -550,7 +554,7 @@ class Core<T extends string> {
     const measures = Object.entries(o.measures ?? {}).map(([as, m]) => {
       alias(as);
       if (kinds.has(as)) throw new EngineError('name_taken', as);
-      const where = conditions(m.where, sh.queryable);
+      const where = conditions(m.where, sh.queryable, sh.ranged);
       const fns = (['count', 'distinct', 'sum', 'avg', 'min', 'max', 'percentile'] as const).filter((k) => k in m);
       if (fns.length !== 1) throw new EngineError('bad_measure', as);
       const fn = fns[0]!;
@@ -561,7 +565,8 @@ class Core<T extends string> {
       }
       const name = (m as Record<string, unknown>)[fn] as string;
       // a declared type's number columns can be measured without being query fields (ADR 0031): a measure reads the
-      // rows the conditions keep, so it needs no index; filters, order, groups and distinct still need query fields
+      // rows the conditions keep, so it needs no index; order, groups and distinct still need query fields (and
+      // conditions on them only bound them, ADR 0032)
       const plain = fn !== 'distinct' && !sh.record && !sh.queryable.has(name) && typeof name === 'string' && Object.hasOwn(sh.fields, name)
         && (sh.fields[name] === 'number' || sh.fields[name] === 'integer');
       const f = plain ? { col: name, kind: sh.fields[name]! } : field(name);
@@ -581,7 +586,7 @@ class Core<T extends string> {
     }
     const limit = o.limit ?? FIND_LIMIT;
     if (!Number.isInteger(limit) || limit < 1 || limit > FIND_MAX) throw new EngineError('bad_limit');
-    const rows = await u.summarize({ table: sh.table, person, personColumn: sh.personColumn, where: conditions(o.where, sh.queryable), by, measures, ...(order ? { order } : {}), limit });
+    const rows = await u.summarize({ table: sh.table, person, personColumn: sh.personColumn, where: conditions(o.where, sh.queryable, sh.ranged), by, measures, ...(order ? { order } : {}), limit });
     await this.audit(sh, 'summarize', rows.length);
     return rows.map((r) => {
       const o: Row = {};

@@ -68,12 +68,21 @@ function idList(v) {
     return s.replace(/^\{|\}$/g, '').split(',').map((x) => x.replace(/^"|"$/g, ''));
 }
 /** Conditions from a where, against the fields that may be queried (name → column and kind). */
-export function conditions(where, fields) {
+export function conditions(where, fields, ranged) {
     const conds = [];
     for (const [name, m] of Object.entries(where ?? {})) {
-        const f = fields.get(name);
-        if (!f)
-            throw new EngineError('not_queryable', name);
+        let f = fields.get(name);
+        if (!f) {
+            // a declared type's number columns can be bounded without being query fields (ADR 0032): gt, gte, lt and lte,
+            // a range of them, or is/not null; anything that would look rows up by a value still needs a query field
+            const r = ranged?.get(name);
+            const keys = m !== null && typeof m === 'object' && !Array.isArray(m) ? Object.keys(m) : [];
+            const bounds = keys.length >= 1 && keys.length <= 2 && keys.every((k) => k === 'gt' || k === 'gte' || k === 'lt' || k === 'lte');
+            const nulls = keys.length === 1 && (keys[0] === 'is' || keys[0] === 'not');
+            if (!r || !(bounds || nulls))
+                throw new EngineError('not_queryable', name);
+            f = r;
+        }
         const check = (v) => {
             if (!fits(f.kind, v) || v === null)
                 throw new EngineError('bad_value', name);
