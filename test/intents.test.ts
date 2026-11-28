@@ -131,7 +131,14 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.equal(await as(P)((w) => w.count('docs', { where: { done: true } })), 12);
       assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { is: null } } })), 6);
       assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { not: null }, title: { in: ['t1', 't2'] } } })), 8);
-      assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gte: 10, lt: 20 } as never } })).catch((e) => e.code), 'bad_match', 'one operator per field');
+      // a range: one lower and one upper bound (ADR 0031), in finds, counts and summaries alike
+      assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gte: 10, lt: 20 } } })), 8);
+      assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gt: 10, lte: 20 } } })), 7, '20 is a null rank');
+      assert.deepEqual((await as(P)((w) => w.find('docs', { where: { rank: { gte: 18, lte: 19 } }, order: 'rank' }))).rows.map((r) => r.rank), [18, 19]);
+      assert.deepEqual(await as(P)((w) => w.summarize('docs', { where: { rank: { gte: 10, lt: 20 } }, measures: { s: { sum: 'rank' } } })), [{ s: 117 }]);
+      for (const bad of [{ gt: 1, gte: 2 }, { lt: 1, lte: 2 }, { gte: 1, in: [2] }, { gte: 1, lt: 5, ne: 3 }, {}])
+        assert.equal(await as(P)((w) => w.count('docs', { where: { rank: bad as never } })).catch((e) => e.code), 'bad_match', JSON.stringify(bad));
+      await code(as(P)((w) => w.count('docs', { where: { rank: { gte: 1, lt: 'x' } } })), 'bad_value', 'rank');
       assert.equal(await as(P)((w) => w.count('docs', { where: { rank: { gte: 10 }, title: { ne: 't0' } } })), 8);
       for (const order of ['rank', '-rank', 'title', '-id', undefined]) {
         const seen: Row[] = [];

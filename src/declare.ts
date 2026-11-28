@@ -66,11 +66,12 @@ export interface SystemDecl {
   erase?: true;
 }
 
-/** A condition on one field: a value (equals), or one operator. */
+/** A condition on one field: a value (equals), one operator, or a range: a lower and an upper bound (ADR 0031). */
 export type Match =
   | string | number | boolean | null
   | { in: readonly unknown[] } | { nin: readonly unknown[] } | { ne: unknown } | { gt: unknown } | { gte: unknown } | { lt: unknown } | { lte: unknown }
-  | { is: null } | { not: null };
+  | { is: null } | { not: null }
+  | { gt: unknown; lt: unknown } | { gt: unknown; lte: unknown } | { gte: unknown; lt: unknown } | { gte: unknown; lte: unknown };
 export type Where = Readonly<Record<string, Match>>;
 
 export interface FindOptions {
@@ -186,6 +187,13 @@ export function conditions(where: Where | undefined, fields: ReadonlyMap<string,
     else if (typeof m !== 'object') conds.push({ col: f.col, op: 'eq', value: check(m) });
     else {
       const keys = Object.keys(m);
+      // a range (ADR 0031): one lower bound and one upper bound, both kept
+      if (keys.length === 2) {
+        const lower = keys.filter((k) => k === 'gt' || k === 'gte'), upper = keys.filter((k) => k === 'lt' || k === 'lte');
+        if (lower.length !== 1 || upper.length !== 1) throw new EngineError('bad_match', name);
+        for (const op of [lower[0], upper[0]] as ('gt' | 'gte' | 'lt' | 'lte')[]) conds.push({ col: f.col, op, value: check((m as Record<string, unknown>)[op]) });
+        continue;
+      }
       const op = keys[0] as (typeof OPS)[number];
       if (keys.length !== 1 || !OPS.includes(op)) throw new EngineError('bad_match', name);
       const v = (m as Record<string, unknown>)[op];

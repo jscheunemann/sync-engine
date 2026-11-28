@@ -105,7 +105,9 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 ```
 
 - `w.find(type, { where, order, limit, after })` → `{ rows, next }`; `w.count(type, { where })`. A system unit may also
-  filter, order and group a person type by its person column.
+  filter, order and group a person type by its person column. A `where` takes, per field, a value, one operator (`in`,
+  `nin`, `ne`, `gt`, `gte`, `lt`, `lte`, `is: null`, `not: null`), or a range: one lower and one upper bound, such as
+  `{ gte: '2025-01-01', lte: '2025-12-31' }` (ADR 0031).
 - `w.put(type, row)`, `w.update(type, key, changes, version?)` (`applied`, `conflict` with the current row, or
   `not_found`), `w.remove(type, key)`.
 - `person` types are each person's; `shared` types are read by anyone and written by system intents; `system` types
