@@ -349,6 +349,41 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       assert.ok(log.some((x) => x.intent === 'analytics' && x.action === 'summarize'), 'summaries are audited');
     });
 
+    test('summaries by a date part: year, quarter, month, ISO week and weekday of a date; and of a time in its zone, its hour (ADR 0030)', async () => {
+      // a date: across a new year, the ISO week (from Monday 2025-12-29) staying one week
+      for (const day of ['2025-12-29', '2026-01-01', '2026-01-05', '2026-04-02']) await as(A)((w) => w.put('days', { day, n: 1 }));
+      const early = { day: { lt: '2026-06-01' } };
+      const by = (part: 'year' | 'quarter' | 'month' | 'week' | 'weekday') =>
+        as(A)((w) => w.summarize('days', { where: early, by: [{ part, field: 'day' }], measures: { days: { count: true } }, order: `day_${part}` }));
+      assert.deepEqual(await by('year'), [{ day_year: 2025, days: 1 }, { day_year: 2026, days: 3 }]);
+      assert.deepEqual(await by('quarter'), [{ day_quarter: '2025-Q4', days: 1 }, { day_quarter: '2026-Q1', days: 2 }, { day_quarter: '2026-Q2', days: 1 }]);
+      assert.deepEqual(await by('month'), [{ day_month: '2025-12', days: 1 }, { day_month: '2026-01', days: 2 }, { day_month: '2026-04', days: 1 }]);
+      assert.deepEqual(await by('week'), [{ day_week: '2025-12-29', days: 2 }, { day_week: '2026-01-05', days: 1 }, { day_week: '2026-03-30', days: 1 }]);
+      assert.deepEqual(await by('weekday'), [{ day_weekday: 1, days: 2 }, { day_weekday: 4, days: 2 }], 'Monday 1, Thursday 4');
+      // two parts at once, named
+      const both = await as(A)((w) => w.summarize('days', { where: early, by: [{ part: 'year', field: 'day', as: 'y' }, { part: 'month', field: 'day', as: 'm' }], measures: { days: { count: true } }, order: 'm' }));
+      assert.deepEqual(both, [{ y: 2025, m: '2025-12', days: 1 }, { y: 2026, m: '2026-01', days: 2 }, { y: 2026, m: '2026-04', days: 1 }]);
+
+      // a time, in its zone: 03:30Z on New Year's Day is still 2025 in New York, a Wednesday at 22:00
+      const ev = (t: string) => sys('analytics')((w) => w.put('events', { id: uuidv7(), viewer: 'v9', sid: 's9', t, a: 'view', tab: 'parts', e: {} }));
+      await ev('2026-01-01T03:30:00.000Z');
+      await ev('2026-01-01T15:00:00.000Z');
+      const at = (part: 'year' | 'weekday' | 'hour', zone: string) =>
+        sys('analytics')((w) => w.summarize('events', { where: { tab: 'parts' }, by: [{ part, field: 't', zone }], measures: { n: { count: true } }, order: `t_${part}` }));
+      assert.deepEqual(await at('year', 'America/New_York'), [{ t_year: 2025, n: 1 }, { t_year: 2026, n: 1 }]);
+      assert.deepEqual(await at('year', 'UTC'), [{ t_year: 2026, n: 2 }], 'the zone decides');
+      assert.deepEqual(await at('weekday', 'America/New_York'), [{ t_weekday: 3, n: 1 }, { t_weekday: 4, n: 1 }]);
+      assert.deepEqual(await at('hour', 'America/New_York'), [{ t_hour: 10, n: 1 }, { t_hour: 22, n: 1 }]);
+
+      const n = { n: { count: true as const } };
+      await code(as(A)((w) => w.summarize('days', { by: [{ part: 'decade' as 'year', field: 'day' }], measures: n })), 'bad_part', 'part');
+      await code(sys('analytics')((w) => w.summarize('events', { by: [{ part: 'year', field: 'a' }], measures: n })), 'not_a_date', 'a');
+      await code(as(A)((w) => w.summarize('days', { by: [{ part: 'year', field: 'day', zone: 'UTC' }], measures: n })), 'bad_zone', 'zone');
+      await code(as(A)((w) => w.summarize('days', { by: [{ part: 'hour', field: 'day' }], measures: n })), 'not_a_time', 'day');
+      await code(sys('analytics')((w) => w.summarize('events', { by: [{ part: 'year', field: 't' }], measures: n })), 'bad_zone', 'zone');
+      await code(sys('analytics')((w) => w.summarize('events', { by: [{ part: 'year', field: 't', zone: 'Mars/Olympus' }], measures: n })), 'bad_zone', 'zone');
+    });
+
     test('a view: read like any type (find, count, summarize), never written', async () => {
       const page = await sys('analytics')((w) => w.find('timed', { where: { a: 'dwell' } }));
       assert.deepEqual(page.rows.map((x) => x.ms).sort(), [1000, 3000]);

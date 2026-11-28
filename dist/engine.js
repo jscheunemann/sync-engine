@@ -152,6 +152,8 @@ export function fieldsFrom(store, type, rec) {
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FIND_LIMIT = 100;
+/** The parts of a date a summary groups by (ADR 0030). */
+const DATE_PARTS = ['year', 'quarter', 'month', 'week', 'weekday', 'hour'];
 /** An IANA time zone the runtime knows. */
 const validZone = (z) => {
     if (typeof z !== 'string' || !/^[A-Za-z0-9_+\-/]{1,64}$/.test(z))
@@ -356,6 +358,23 @@ class Core {
                 const f = field(g);
                 kinds.set(g, f.kind);
                 return { col: f.col, as: alias(g) };
+            }
+            if ('part' in g) {
+                // a date's part (ADR 0030): a date as it is, a time in its zone
+                if (!DATE_PARTS.includes(g.part))
+                    throw new EngineError('bad_part', 'part');
+                const f = field(g.field);
+                if (f.kind !== 'date' && f.kind !== 'time')
+                    throw new EngineError('not_a_date', g.field);
+                if (f.kind === 'date' && g.zone !== undefined)
+                    throw new EngineError('bad_zone', 'zone');
+                if (f.kind === 'date' && g.part === 'hour')
+                    throw new EngineError('not_a_time', g.field);
+                if (f.kind === 'time' && !(typeof g.zone === 'string' && validZone(g.zone)))
+                    throw new EngineError('bad_zone', 'zone');
+                const as = alias(g.as ?? `${g.field}_${g.part}`);
+                kinds.set(as, g.part === 'year' || g.part === 'weekday' || g.part === 'hour' ? 'integer' : 'text');
+                return { part: g.part, col: f.col, ...(f.kind === 'time' ? { zone: g.zone } : {}), as };
             }
             const f = field(g.day);
             if (f.kind !== 'time')

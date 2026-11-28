@@ -111,8 +111,9 @@ await session.work({ system: 'redeem_invitation' }, (w) => w.find('invitations',
 - `person` types are each person's; `shared` types are read by anyone and written by system intents; `system` types
   only by system intents. A system intent touches only the types it declares, and each intent it runs is written to
   `<schema>.engine_audit` (no values).
-- `w.summarize(type, { where, by, measures, order, limit })`: groups (fields, JSON `paths`, or `{ day, zone }`) with
-  `count`, `distinct`, `sum`, `avg`, `min`, `max` and `percentile`, each with its own `where` if wanted (ADR 0016).
+- `w.summarize(type, { where, by, measures, order, limit })`: groups (fields, JSON `paths`, `{ day, zone }`, or a date's
+  part, `{ part, field, zone? }`: year, quarter, month, ISO week, weekday, or a time's hour, ADR 0030) with `count`,
+  `distinct`, `sum`, `avg`, `min`, `max` and `percentile`, each with its own `where` if wanted (ADR 0016).
 - Kinds include `date` (a local day, `YYYY-MM-DD`); a person type with `writes: 'system'` is read by each person and
   written only by system intents (ADR 0019).
 - A type can be a view the app's migrations define (`view: true`): read like any type, never written (ADR 0018).

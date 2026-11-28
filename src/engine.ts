@@ -11,12 +11,12 @@
 // The rules are version 1's unchanged (its server.ts, removed at 3.0.0: ADR 0028); the contract tests ran every case against both.
 
 import { type AuditEntry, type Backend, type Cond, type Connection, isSystem, type Row, RuleError, type SchemaPlan, type Scope, type TableLayout, type Unit } from './backend.ts';
-import { conditions, cursor, EngineError, type FindOptions, fits, type Kind, out, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
+import { conditions, cursor, type DatePart, EngineError, type FindOptions, fits, type Kind, out, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
 import type { ChangesPage, Fields, Op, Problem, ServerRecord } from './protocol.ts';
 import { type FieldDecl, RecordType, type StoredRecord } from './records.ts';
 
 export { RuleError, isSystem, type SchemaPlan, type TableLayout, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.ts';
-export { EngineError, type FindOptions, type GroupBy, type Kind, type Match, type Measure, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
+export { type DatePart, EngineError, type FindOptions, type GroupBy, type Kind, type Match, type Measure, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.ts';
 
 export { type FieldDecl, type StoredRecord } from './records.ts';
 
@@ -348,6 +348,8 @@ interface Shape {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FIND_LIMIT = 100;
+/** The parts of a date a summary groups by (ADR 0030). */
+const DATE_PARTS: readonly DatePart[] = ['year', 'quarter', 'month', 'week', 'weekday', 'hour'];
 /** An IANA time zone the runtime knows. */
 const validZone = (z: unknown): z is string => {
   if (typeof z !== 'string' || !/^[A-Za-z0-9_+\-/]{1,64}$/.test(z)) return false;
@@ -524,6 +526,18 @@ class Core<T extends string> {
         const f = field(g);
         kinds.set(g, f.kind);
         return { col: f.col, as: alias(g) };
+      }
+      if ('part' in g) {
+        // a date's part (ADR 0030): a date as it is, a time in its zone
+        if (!DATE_PARTS.includes(g.part)) throw new EngineError('bad_part', 'part');
+        const f = field(g.field);
+        if (f.kind !== 'date' && f.kind !== 'time') throw new EngineError('not_a_date', g.field);
+        if (f.kind === 'date' && g.zone !== undefined) throw new EngineError('bad_zone', 'zone');
+        if (f.kind === 'date' && g.part === 'hour') throw new EngineError('not_a_time', g.field);
+        if (f.kind === 'time' && !(typeof g.zone === 'string' && validZone(g.zone))) throw new EngineError('bad_zone', 'zone');
+        const as = alias(g.as ?? `${g.field}_${g.part}`);
+        kinds.set(as, g.part === 'year' || g.part === 'weekday' || g.part === 'hour' ? 'integer' : 'text');
+        return { part: g.part, col: f.col, ...(f.kind === 'time' ? { zone: g.zone! } : {}), as };
       }
       const f = field(g.day);
       if (f.kind !== 'time') throw new EngineError('not_a_time', g.day);

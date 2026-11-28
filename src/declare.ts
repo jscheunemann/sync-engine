@@ -94,8 +94,14 @@ export type Measure = { where?: Where } & (
   | { percentile: string; p: number }
 );
 
-/** A group of a summary: a field, or a time field's local day in a time zone (`YYYY-MM-DD`). */
-export type GroupBy = string | { day: string; zone: string; as?: string };
+/** A part of a date a summary can group by (ADR 0030). */
+export type DatePart = 'year' | 'quarter' | 'month' | 'week' | 'weekday' | 'hour';
+/**
+ * A group of a summary: a field; a time field's local day in a time zone (`YYYY-MM-DD`); or a part of a date field, or of
+ * a time field's local date and time in a zone (ADR 0030): `year` 2026, `quarter` '2026-Q4', `month` '2026-11', `week`
+ * the Monday it starts '2026-11-23', `weekday` 1 (Monday) to 7, `hour` 0 to 23 (times only).
+ */
+export type GroupBy = string | { day: string; zone: string; as?: string } | { part: DatePart; field: string; zone?: string; as?: string };
 
 export interface SummaryOptions {
   where?: Where;
