@@ -164,6 +164,9 @@ export declare function out(kind: Kind, v: unknown): unknown;
 export declare function conditions(where: Where | undefined, fields: ReadonlyMap<string, {
     col: string;
     kind: Kind;
+}>, ranged?: ReadonlyMap<string, {
+    col: string;
+    kind: Kind;
 }>): Cond[];
 /** A find's cursor: the last row's order value and key values, opaque to the app (base64url JSON). */
 export declare const cursor: {

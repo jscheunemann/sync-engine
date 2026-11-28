@@ -409,6 +409,31 @@ function contract(name: string, rig: () => Rig, opts: { skip?: string | false } 
       await code(as(P)((w) => w.summarize('membership', { measures: { s: { max: 'via' } } })), 'not_queryable', 'via');
     });
 
+    test('a find, count or summary bounds any number column of a declared type; looking rows up by its value still needs a query field (ADR 0032)', async () => {
+      const P = uuidv7();
+      for (const [day, n] of [['2026-06-01', 2], ['2026-06-02', 5], ['2026-06-03', 8], ['2026-06-04', 12]] as const) await as(P)((w) => w.put('days', { day, n }));
+      await as(P)((w) => w.put('days', { day: '2026-06-05' }));
+      const june = { gte: '2026-06-01', lte: '2026-06-30' };
+      // a bound, a range, is null: in a find, a count, a summary and a measure's own where
+      const days = async (where: Record<string, unknown>) => (await as(P)((w) => w.find('days', { where: { day: june, ...where }, order: 'day' }))).rows.map((r) => r.n);
+      assert.deepEqual(await days({ n: { gte: 5 } }), [5, 8, 12]);
+      assert.deepEqual(await days({ n: { gt: 2, lt: 12 } }), [5, 8]);
+      assert.deepEqual(await days({ n: { is: null } }), [null]);
+      assert.deepEqual(await days({ n: { not: null } }), [2, 5, 8, 12]);
+      assert.equal(await as(P)((w) => w.count('days', { where: { day: june, n: { lte: 5 } } })), 2);
+      const [s] = await as(P)((w) => w.summarize('days', { where: { day: june, n: { gte: 5, lte: 12 } }, measures: { c: { count: true }, total: { sum: 'n' }, big: { count: true, where: { n: { gt: 10 } } } } }));
+      assert.deepEqual(s, { c: 3, total: 25, big: 1 });
+      // values, lists, and anything else that looks rows up by n: still query fields only
+      await code(as(P)((w) => w.find('days', { where: { n: 5 } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.find('days', { where: { n: { in: [2, 5] } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.find('days', { where: { n: { ne: 5 } } })), 'not_queryable', 'n');
+      await code(as(P)((w) => w.count('days', { where: { n: { gte: 1, gt: 2 } } })), 'bad_match', 'n');
+      await code(as(P)((w) => w.find('days', { where: { n: null } })), 'not_queryable', 'n');
+      // a bound must be a number; a text column can't be bounded this way
+      await code(as(P)((w) => w.find('days', { where: { n: { gte: 'five' } } })), 'bad_value', 'n');
+      await code(as(P)((w) => w.find('membership', { where: { via: { gte: 'a' } } })), 'not_queryable', 'via');
+    });
+
     test('a view: read like any type (find, count, summarize), never written', async () => {
       const page = await sys('analytics')((w) => w.find('timed', { where: { a: 'dwell' } }));
       assert.deepEqual(page.rows.map((x) => x.ms).sort(), [1000, 3000]);
