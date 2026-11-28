@@ -3,7 +3,7 @@ import { type FindOptions, type SummaryOptions, type SystemDecl, type TypeDecl, 
 import type { ChangesPage, Fields, Op, Problem, ServerRecord } from './protocol.js';
 import { type FieldDecl, type StoredRecord } from './records.js';
 export { RuleError, isSystem, type SchemaPlan, type TableLayout, type Backend, type PersonScope, type Row, type Scope, type SystemScope } from './backend.js';
-export { EngineError, type FindOptions, type GroupBy, type Kind, type Match, type Measure, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.js';
+export { type DatePart, EngineError, type FindOptions, type GroupBy, type Kind, type Match, type Measure, type SummaryOptions, type SystemDecl, type TypeDecl, type Where } from './declare.js';
 export { type FieldDecl, type StoredRecord } from './records.js';
 /** A page of a find: the rows, and the cursor for the next page (null at the end). */
 export interface Page<R> {

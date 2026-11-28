@@ -216,10 +216,35 @@ function unit(d: Db, layout: Layout, person: string | null): Unit {
       }
     };
     const dayIn = (v: unknown, zone: string) => new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(String(v)));
+    // a date's part (ADR 0030): a date as it is, a time in its zone
+    const partOf = (v: unknown, part: string, zone?: string): unknown => {
+      if (v === null || v === undefined) return null;
+      let y: number, m: number, d: number, h = 0;
+      if (zone === undefined) {
+        [y, m, d] = String(v).slice(0, 10).split('-').map(Number) as [number, number, number];
+      } else {
+        const ps = new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', hourCycle: 'h23' }).formatToParts(new Date(String(v)));
+        const at = (t: string) => Number(ps.find((p) => p.type === t)?.value);
+        [y, m, d, h] = [at('year'), at('month'), at('day'), at('hour')];
+      }
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const date = new Date(Date.UTC(y, m - 1, d));
+      const fromMonday = (date.getUTCDay() + 6) % 7;
+      switch (part) {
+        case 'year': return y;
+        case 'quarter': return `${y}-Q${Math.ceil(m / 3)}`;
+        case 'month': return `${y}-${pad(m)}`;
+        case 'week': return new Date(date.getTime() - fromMonday * 86_400_000).toISOString().slice(0, 10);
+        case 'weekday': return fromMonday + 1;
+        default: return h;
+      }
+    };
     const groups = new Map<string, { key: Row; rows: Row[] }>();
     for (const r of rows) {
       const key: Row = {};
-      for (const g of sq.by) key[g.as] = 'col' in g ? (r[g.col] ?? null) : r[g.day] == null ? null : dayIn(r[g.day], g.zone);
+      for (const g of sq.by) {
+        key[g.as] = 'part' in g ? partOf(r[g.col], g.part, g.zone) : 'col' in g ? (r[g.col] ?? null) : r[g.day] == null ? null : dayIn(r[g.day], g.zone);
+      }
       const k = JSON.stringify(key);
       if (!groups.has(k)) groups.set(k, { key, rows: [] });
       groups.get(k)!.rows.push(r);

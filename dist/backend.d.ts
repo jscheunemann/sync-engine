@@ -106,12 +106,18 @@ export interface SummaryQuery {
     person: string | null;
     personColumn: string;
     where: readonly Cond[];
+    /** `part` (ADR 0030): a date column's part, or a time column's in `zone` (given exactly when the column is a time). */
     by: readonly ({
         col: string;
         as: string;
     } | {
         day: string;
         zone: string;
+        as: string;
+    } | {
+        part: 'year' | 'quarter' | 'month' | 'week' | 'weekday' | 'hour';
+        col: string;
+        zone?: string;
         as: string;
     })[];
     measures: readonly {

@@ -39,3 +39,4 @@ connection to the layer that owns all of an app's data access.
 | [0027](0027-the-plan-as-a-script.md) | The plan as a script that checks the database itself, safe to run after every migration | Accepted |
 | [0028](0028-version-3-driver-4-no-server.md) | Version 3: the engine runs on Postgres.js 4, and version 1's `./server` is gone | Accepted |
 | [0029](0029-put-many.md) | Put many rows of a declared type at once | Accepted |
+| [0030](0030-summary-date-parts.md) | Group a summary by a date's year, quarter, month, week, weekday or hour | Accepted |

@@ -346,7 +346,22 @@ function unit(tx, layout, settings, person) {
             // The groups are worked out in a subquery and grouped by name there: grouping by position would go to the
             // driver as a parameter, and an expression with a parameter in it (a time zone) can't be matched to itself.
             const inner = [tx `*`];
-            q.by.forEach((g, i) => inner.push('col' in g ? tx `${ref(tx, cs, g.col)} as ${tx(`__g${i}`)}` : tx `((${tx(g.day)} at time zone ${g.zone})::date)::text as ${tx(`__g${i}`)}`));
+            // a date's part (ADR 0030): on a timestamp without a zone (a date as it is, a time in its zone), so the session's
+            // zone never enters; ISO weeks (Monday) and weekdays (1 Monday … 7 Sunday)
+            const part = (g) => {
+                const base = g.zone === undefined ? tx `(${ref(tx, cs, g.col)})::timestamp` : tx `(${ref(tx, cs, g.col)} at time zone ${g.zone})`;
+                switch (g.part) {
+                    case 'year': return tx `extract(year from ${base})::int`;
+                    case 'quarter': return tx `to_char(${base}, 'YYYY-"Q"Q')`;
+                    case 'month': return tx `to_char(${base}, 'YYYY-MM')`;
+                    case 'week': return tx `(date_trunc('week', ${base})::date)::text`;
+                    case 'weekday': return tx `extract(isodow from ${base})::int`;
+                    default: return tx `extract(hour from ${base})::int`;
+                }
+            };
+            q.by.forEach((g, i) => inner.push('part' in g ? tx `${part(g)} as ${tx(`__g${i}`)}`
+                : 'col' in g ? tx `${ref(tx, cs, g.col)} as ${tx(`__g${i}`)}`
+                    : tx `((${tx(g.day)} at time zone ${g.zone})::date)::text as ${tx(`__g${i}`)}`));
             const sel = q.by.map((g, i) => tx `${tx(`__g${i}`)} as ${tx(g.as)}`);
             for (const m of q.measures) {
                 const e = m.col !== undefined ? ref(tx, cs, m.col) : tx ``;
